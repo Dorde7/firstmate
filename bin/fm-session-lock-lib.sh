@@ -86,7 +86,12 @@ fm_codex_desktop_session_id() {
 # distinguishes sessions under that same shared pid.
 # The matching id and unexpired lease are the actual ownership evidence.
 # A pre-lease lock naming the same live daemon has no ownership evidence.
-FM_CODEX_DESKTOP_LEASE_SECONDS=43200
+# The lease lasts ten default checkpoint cycles. The foreground checkpoint, every
+# Bash tool call, every turn end, and session start or resume renew it, so a
+# live thread never approaches the bound while an ended thread frees the lock
+# within half an hour.
+FM_CODEX_DESKTOP_LEASE_SECONDS=1800
+FM_CODEX_DESKTOP_LEASE_TOUCH_SECONDS=300
 FM_CODEX_LEASE_PID=
 FM_CODEX_LEASE_ID=
 FM_CODEX_LEASE_GENERATION=
@@ -120,6 +125,21 @@ fm_codex_desktop_lease_live() {  # <state> <lock-pid>
   [ "${#FM_CODEX_LEASE_EXPIRY}" -le 12 ] || return 1
   [ "$now" -lt "$FM_CODEX_LEASE_EXPIRY" ] \
     && [ "$FM_CODEX_LEASE_EXPIRY" -le "$((now + FM_CODEX_DESKTOP_LEASE_SECONDS))" ]
+}
+
+# Hooks that fire inside a Desktop thread renew a lease this thread owns at most
+# once per touch interval. They never claim a lock and never fail the hook.
+fm_codex_desktop_lease_touch() {  # <state> <fm-lock-path>
+  local pid now
+  pid=$(cat "$1/.lock" 2>/dev/null) || return 0
+  fm_codex_desktop_lease_matches "$1" "$pid" || return 0
+  [ "${#FM_CODEX_LEASE_EXPIRY}" -le 12 ] || return 0
+  now=$(date +%s) || return 0
+  [ "$((FM_CODEX_LEASE_EXPIRY - now))" -gt \
+    "$((FM_CODEX_DESKTOP_LEASE_SECONDS - FM_CODEX_DESKTOP_LEASE_TOUCH_SECONDS))" ] && return 0
+  fm_codex_desktop_session_id >/dev/null 2>&1 || return 0
+  "$2" renew --if-owned >/dev/null 2>&1 || true
+  return 0
 }
 
 fm_session_lock_owner_live() {  # <state> <lock-pid>

@@ -65,7 +65,10 @@ if [ "${1:-}" = "status" ]; then
   exit 0
 fi
 
-case "${1:-}" in ''|renew) ;; *) echo "error: unknown lock action: $1" >&2; exit 2 ;; esac
+case "${1:-} ${2:-}" in
+  ' '|'renew '|'renew --if-owned') ;;
+  *) echo "error: unknown lock action: $*" >&2; exit 2 ;;
+esac
 
 me=$(fm_session_lock_anchor_pid) || { echo "error: cannot locate harness process in ancestry" >&2; exit 1; }
 probe=$(mktemp "$STATE/.lock-write.XXXXXX" 2>/dev/null) || {
@@ -233,25 +236,27 @@ confirm_own_lock() {  # <recorded-pid>
   return 1
 }
 
-# A foreground Codex checkpoint uses renew to keep a Desktop lease fresh. It
-# never claims or reclaims a lock; a foreign or expired owner stops here.
+# A foreground Codex checkpoint uses renew to keep a Desktop lease fresh. When
+# the recorded owner is no longer live (expired lease, restarted app-server, or
+# a pre-lease lock) renew takes the ordinary stale-owner claim path below, which
+# still refuses a foreign live owner. Hooks pass --if-owned and never claim.
 if [ "${1:-}" = renew ]; then
-  if ! { [ -f "$LOCK" ] && [ ! -L "$LOCK" ] \
-    && fm_session_lock_owned_by_self "$STATE"; }; then
-      echo "error: this session does not own the fleet lock" >&2
-      exit 1
+  if [ -f "$LOCK" ] && [ ! -L "$LOCK" ] && fm_session_lock_owned_by_self "$STATE"; then
+    fm_lock_acquire_wait "$CLAIM_LOCK"
+    CLAIM_LOCK_HELD=1
+    recorded=$(cat "$LOCK" 2>/dev/null || true)
+    if fm_session_lock_owned_by_self "$STATE"; then
+      publish_desktop_lease_or_die "$recorded" refresh
+      release_claim_lock
+      echo "lock renewed: session marker $recorded"
+      exit 0
+    fi
+    release_claim_lock
   fi
-  fm_lock_acquire_wait "$CLAIM_LOCK"
-  CLAIM_LOCK_HELD=1
-  recorded=$(cat "$LOCK" 2>/dev/null || true)
-  fm_session_lock_owned_by_self "$STATE" || {
-    echo "error: fleet lock ownership changed before renewal" >&2
+  if [ "${2:-}" = --if-owned ]; then
+    echo "error: this session does not own the fleet lock" >&2
     exit 1
-  }
-  publish_desktop_lease_or_die "$recorded" refresh
-  release_claim_lock
-  echo "lock renewed: session marker $recorded"
-  exit 0
+  fi
 fi
 
 refuse_live_owner() {  # <recorded-pid>
