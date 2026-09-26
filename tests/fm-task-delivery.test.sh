@@ -458,7 +458,7 @@ test_promotion_branch_command_is_shell_safe() {
 }
 
 test_local_merge_uses_the_recorded_ship_branch() {
-  local home proj id main fix out
+  local home proj id main fix out baseline
   home="$TMP_ROOT/local-merge-branch/home"
   proj="$TMP_ROOT/local-merge-branch/proj"
   id=local-merge-branch-e2
@@ -470,12 +470,15 @@ test_local_merge_uses_the_recorded_ship_branch() {
   git -C "$proj" add base || fail "could not stage local-merge branch fixture base"
   git -C "$proj" commit -qm base || fail "could not commit local-merge branch fixture base"
   main=$(git -C "$proj" branch --show-current)
+  baseline=$(git -C "$proj" rev-parse HEAD)
   git -C "$proj" checkout -qb "fix/$id" || fail "could not create recorded branch fixture"
   printf 'change\n' > "$proj/change"
   git -C "$proj" add change || fail "could not stage recorded branch fixture"
   git -C "$proj" commit -qm change || fail "could not commit recorded branch fixture"
   fix=$(git -C "$proj" rev-parse HEAD)
   git -C "$proj" checkout -q "$main" || fail "could not restore fixture default branch"
+  git -C "$proj" update-ref refs/remotes/origin/feature/review "$baseline"
+  git -C "$proj" symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/feature/review
   cat > "$home/data/projects.md" <<EOF
 - $(basename "$proj") [local-only branch=contrib/] - changed after task intake (added 2026-01-01)
 EOF
@@ -486,6 +489,8 @@ EOF
     || fail "local merge did not fast-forward the default branch to the recorded ship branch"
   assert_contains "$out" "merged fix/$id into local $main" \
     "local merge did not report the immutable recorded branch"
+  [ "$(git -C "$proj" symbolic-ref refs/remotes/origin/HEAD)" = refs/remotes/origin/feature/review ] \
+    || fail "local merge changed the mirror's remote HEAD"
   pass "fm-merge-local: a registry change cannot redirect an in-flight local-only task"
 }
 

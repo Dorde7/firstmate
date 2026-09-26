@@ -26,6 +26,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-backlog-transition-lib.sh
 . "$SCRIPT_DIR/fm-backlog-transition-lib.sh"
+# shellcheck source=bin/fm-local-default-branch-lib.sh
+. "$SCRIPT_DIR/fm-local-default-branch-lib.sh"
 if [ "$#" -ne 1 ] || ! fm_pr_task_id_valid "$1"; then
   echo "error: invalid local merge request" >&2
   exit 2
@@ -80,6 +82,10 @@ MODE=$(grep '^mode=' "$META" | cut -d= -f2- || true)
 
 default_branch() {
   local ref branch
+  if fm_is_local_only_project_task "$PROJ" "$MODE"; then
+    fm_local_default_branch "$PROJ"
+    return
+  fi
   ref=$(git -C "$PROJ" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)
   if [ -n "$ref" ]; then
     echo "${ref#origin/}"

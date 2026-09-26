@@ -326,6 +326,7 @@ for _teardown_source in \
   fm-composer-lib.sh \
   fm-cursor-lib.sh \
   fm-nm-run-lib.sh \
+  fm-local-default-branch-lib.sh \
   fm-wake-lib.sh \
   fm-lease-lib.sh
 do
@@ -348,6 +349,8 @@ unset _teardown_source
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-local-default-branch-lib.sh
+. "$SCRIPT_DIR/fm-local-default-branch-lib.sh"
 # shellcheck source=bin/fm-public-followup-lib.sh
 . "$SCRIPT_DIR/fm-public-followup-lib.sh"
 # shellcheck source=bin/fm-secondmate-registry-lib.sh
@@ -1315,6 +1318,10 @@ fi
 
 default_branch() {
   local ref branch
+  if fm_is_local_only_project_task "$PROJ" "$MODE"; then
+    fm_local_default_branch "$PROJ"
+    return
+  fi
   ref=$(git -C "$PROJ" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)
   if [ -n "$ref" ]; then
     echo "${ref#origin/}"
