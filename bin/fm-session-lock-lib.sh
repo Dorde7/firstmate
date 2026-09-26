@@ -90,6 +90,10 @@ fm_codex_desktop_session_id() {
 # Bash tool call, every turn end, and session start or resume renew it, so a
 # live thread never approaches the bound while an ended thread frees the lock
 # within half an hour.
+# Renewal gap: while supervising, the longest normal gap is the 180-second
+# checkpoint interval. An idle thread that is not supervising renews nothing,
+# and its lease is meant to expire; the renew fall-through in bin/fm-lock.sh
+# reclaims that free lock at the thread's next checkpoint.
 FM_CODEX_DESKTOP_LEASE_SECONDS=1800
 FM_CODEX_DESKTOP_LEASE_TOUCH_SECONDS=300
 FM_CODEX_LEASE_PID=
