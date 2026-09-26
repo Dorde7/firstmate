@@ -543,6 +543,35 @@ test_local_merge_lands_on_the_mirror_checkout_regardless_of_registry() {
   pass "fm-merge-local: a local-only task lands on the mirror checkout whatever the registry or a stale main says"
 }
 
+test_local_merge_refuses_a_mirror_off_its_landing_branch() {
+  local left home proj id out landing before
+  for left in fm/other-task scratch; do
+    home="$TMP_ROOT/local-merge-off-landing-${left##*/}/home"
+    proj="$TMP_ROOT/local-merge-off-landing-${left##*/}/proj"
+    id="local-merge-off-landing-${left##*/}"
+    mkdir -p "$home/state" "$home/data" "$proj"
+    git -C "$proj" init -q -b master || fail "could not initialize $left mirror fixture"
+    git -C "$proj" config user.email test@example.com
+    git -C "$proj" config user.name test
+    git -C "$proj" commit -q --allow-empty -m base || fail "could not commit $left mirror fixture base"
+    landing=$(git -C "$proj" rev-parse master)
+    git -C "$proj" branch "$left" || fail "could not create $left"
+    git -C "$proj" checkout -qb "fix/$id" || fail "could not create $left task branch"
+    git -C "$proj" commit -q --allow-empty -m change || fail "could not commit $left task change"
+    git -C "$proj" checkout -q "$left" || fail "could not leave the mirror on $left"
+    before=$(git -C "$proj" rev-parse "$left")
+    printf 'project=%s\nmode=local-only\nbranch=fix/%s\nlanding_branch=master\n' "$proj" "$id" > "$home/state/$id.meta"
+    if out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$MERGE_LOCAL" "$id" 2>&1); then
+      fail "local merge landed on $left instead of refusing: $out"
+    fi
+    assert_contains "$out" "this task lands on 'master'" \
+      "local merge off the landing branch ($left) did not name the recorded landing branch"
+    [ "$(git -C "$proj" rev-parse master)" = "$landing" ] || fail "local merge moved master while the mirror was on $left"
+    [ "$(git -C "$proj" rev-parse "$left")" = "$before" ] || fail "local merge fast-forwarded $left"
+  done
+  pass "fm-merge-local: a local-only task refuses to land while the mirror is off its recorded landing branch"
+}
+
 # A registered name may contain spaces, and the lookup must match the whole
 # name rather than only its first whitespace-delimited token (issue #1977).
 # The longer "foo bar" row is listed before the "foo" row so a leading-prefix
@@ -1678,6 +1707,7 @@ test_promotion_persists_the_selected_ship_branch
 test_promotion_branch_command_is_shell_safe
 test_local_merge_uses_the_recorded_ship_branch
 test_local_merge_lands_on_the_mirror_checkout_regardless_of_registry
+test_local_merge_refuses_a_mirror_off_its_landing_branch
 test_project_mode_matches_whole_multiword_names
 test_project_mode_maps_the_conditional_policy
 test_project_mode_binds_the_forge_orthogonally

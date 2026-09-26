@@ -245,7 +245,29 @@ test_local_only_pool_uses_mirror_default_not_live_origin_head() {
   [ "$(git -C "$PROJECT_DIR" symbolic-ref refs/remotes/origin/HEAD)" = "$origin_head" ] \
     || fail "local-only spawn rewrote the mirror's origin/HEAD"
   [ ! -e "$POOL_DIR/feature.txt" ] || fail "local-only spawn included the live origin's feature branch"
+  assert_grep 'landing_branch=master' "$HOME_DIR/state/$id.meta" \
+    "local-only spawn did not record the mirror's landing branch"
   pass "local-only spawn uses mirror master and preserves origin/HEAD when origin is a live checkout"
+}
+
+test_local_only_spawn_refuses_a_mirror_left_on_a_task_branch() {
+  local rec id out status before
+  id='pool-local-only-task-branch-r1'
+  rec=$(make_case local-only-task-branch "$id" master)
+  read_case_record "$rec"
+  git -C "$PROJECT_DIR" checkout --quiet -b fm/other-task
+  printf '%s\n' '- project [local-only] - test fixture (added 2026-09-26)' > "$HOME_DIR/data/projects.md"
+  before=$(git -C "$POOL_DIR" rev-parse HEAD)
+
+  out=$(run_spawn "$id" --mode local-only --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "local-only spawn launched from a mirror left on fm/other-task"$'\n'"$out"
+  assert_contains "$out" "task branch 'fm/other-task'" \
+    "local-only spawn did not explain the task-branch refusal"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
+    || fail "local-only spawn reset the pool onto the mirror's task branch"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "refused local-only spawn published a task record"
+  pass "local-only spawn refuses a mirror left on another fm/* task branch"
 }
 
 test_local_only_scout_uses_mirror_checkout_not_live_origin_head() {
@@ -836,6 +858,7 @@ test_non_main_default_branch_refreshes_before_branching
 test_local_only_pool_uses_mirror_default_not_live_origin_head
 test_local_only_pool_uses_checked_out_branch_over_stale_main
 test_local_only_scout_uses_mirror_checkout_not_live_origin_head
+test_local_only_spawn_refuses_a_mirror_left_on_a_task_branch
 test_direct_pr_and_scout_refresh_before_launch
 test_dirty_pool_refuses_without_discarding_work
 test_unresolved_remote_default_refuses_pool

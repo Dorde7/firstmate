@@ -638,6 +638,7 @@ MODEL=
 EFFORT=
 BACKEND_ARG=
 MODE=
+LANDING_BRANCH=
 YOLO=
 BRANCH_PREFIX=fm/
 TRACEPARENT_ARG=
@@ -1300,6 +1301,7 @@ spawn_abort_cleanup() {
             [ -z "${MODE:-}" ] || echo "mode=$MODE"
             [ -z "${YOLO:-}" ] || echo "yolo=$YOLO"
             [ -z "${BRANCH:-}" ] || echo "branch=$BRANCH"
+            [ -z "${LANDING_BRANCH:-}" ] || echo "landing_branch=$LANDING_BRANCH"
             echo "tasktmp=${TASK_TMP:-}"
             echo "model=${MODEL:-default}"
             echo "effort=${EFFORT:-default}"
@@ -1772,6 +1774,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
     exit 1
   fi
   MODE=$(fm_meta_get "$RELAUNCH_META" mode)
+  LANDING_BRANCH=$(fm_meta_get "$RELAUNCH_META" landing_branch)
   YOLO=$(fm_meta_get "$RELAUNCH_META" yolo)
   if [ "$KIND" = ship ]; then
     BRANCH=$(fm_meta_get "$RELAUNCH_META" branch)
@@ -3090,6 +3093,13 @@ if [ "$KIND" = ship ]; then
   if [ "$BRANCH" != "$STANDING_BRANCH$ID" ]; then
     echo "notice: $ID ships branch=$BRANCH while $PROJ_NAME registers the ship-branch prefix '$STANDING_BRANCH' (branch $STANDING_BRANCH$ID) - the task's branch and PR will read as firstmate-authored; proceed only on a current explicit captain instruction or an intake judgment you can state" >&2
   fi
+  # A local-only ship's landing branch is resolved once here and recorded for merge-local and teardown.
+  if fm_is_local_only_task "$MODE" && [ -z "${LANDING_BRANCH:-}" ]; then
+    LANDING_BRANCH=$(fm_resolve_local_landing_branch "$PROJ_ABS") || {
+      echo "error: $ID cannot launch: the local-only mirror $PROJ_ABS has no usable landing branch" >&2
+      exit 1
+    }
+  fi
 fi
 
 BRIEF_DIR_REAL=$(cd "$(dirname "$BRIEF")" && pwd -P)
@@ -3281,8 +3291,8 @@ freshen_spawn_worktree_base() { # <worktree>
       ;;
   esac
   if [ "$mirror_local_only" = 1 ]; then
-    default=$(fm_local_default_branch "$PROJ_ABS") || {
-      echo "error: could not determine the mirror's local default branch for pooled worktree '$worktree'; refusing to launch" >&2
+    default=$(fm_local_landing_branch "$PROJ_ABS" "${LANDING_BRANCH:-}") || {
+      echo "error: could not determine the mirror's landing branch for pooled worktree '$worktree'; refusing to launch" >&2
       return 1
     }
     target="refs/heads/$default"
@@ -4786,7 +4796,7 @@ SPAWN_META_PATH=$SPAWN_META_TMP
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo branch tasktmp model effort account account_provider busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
+      split("window endpoint_task_id worktree project harness kind mode yolo branch landing_branch tasktmp model effort account account_provider busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -4802,6 +4812,7 @@ preserve_relaunch_meta() {
   [ -z "$MODE" ] || echo "mode=$MODE"
   [ -z "$YOLO" ] || echo "yolo=$YOLO"
   [ -z "${BRANCH:-}" ] || echo "branch=$BRANCH"
+  [ -z "${LANDING_BRANCH:-}" ] || echo "landing_branch=$LANDING_BRANCH"
   echo "tasktmp=$TASK_TMP"
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"

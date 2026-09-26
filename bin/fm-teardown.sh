@@ -1319,7 +1319,7 @@ fi
 default_branch() {
   local ref branch
   if fm_is_local_only_task "$MODE"; then
-    fm_local_default_branch "$PROJ"
+    fm_local_landing_branch "$PROJ" "$(fm_meta_get "$META" landing_branch)"
     return
   fi
   ref=$(git -C "$PROJ" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)

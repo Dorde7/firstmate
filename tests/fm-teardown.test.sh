@@ -787,6 +787,28 @@ test_local_only_merged_to_local_main_allows() {
   pass "local-only worktree with work merged into local main is torn down (no regression)"
 }
 
+test_local_only_primary_off_recorded_landing_branch_refuses() {
+  local case_dir rc wt_head
+  case_dir=$(make_case landing-scratch)
+  write_meta "$case_dir" local-only ship
+  printf 'landing_branch=main\n' >> "$case_dir/state/task-x1.meta"
+  wt_commit "$case_dir" "merged work"
+  wt_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  git -C "$case_dir/project" checkout -q -b scratch
+  git -C "$case_dir/project" update-ref refs/heads/scratch "$wt_head"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  [ "$rc" -ne 0 ] || fail "landing-scratch: teardown accepted work landed on a scratch branch instead of the recorded landing branch"
+  grep -q "this task lands on 'main'" "$case_dir/stderr" \
+    || fail "landing-scratch: teardown did not name the recorded landing branch: $(cat "$case_dir/stderr")"
+  [ -d "$case_dir/wt" ] || fail "landing-scratch: teardown removed the worktree despite refusing"
+  pass "local-only teardown refuses when the mirror is off the recorded landing branch"
+}
+
 test_no_mistakes_origin_remote_allows() {
   local case_dir rc
   case_dir=$(make_case nm-origin)
@@ -4073,6 +4095,7 @@ test_teardown_closes_the_backlog_item_itself
 test_teardown_manual_backend_leaves_the_backlog_to_the_operator
 test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows
+test_local_only_primary_off_recorded_landing_branch_refuses
 test_no_mistakes_origin_remote_allows
 test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed
