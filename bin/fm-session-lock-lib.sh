@@ -32,6 +32,120 @@ FM_HARNESS_RE='claude|codex|opencode|grok|kimi|^pi$|^pi-signed$|^omp$'
 # bin/fm-claude-stop-autoarm.sh.
 FM_HARNESS_NAMES=(claude codex opencode grok kimi pi-signed pi omp)
 
+# A Codex app-server is shared by Desktop threads and can outlive all of them.
+# Its executable is harness-shaped, but its `app-server` subcommand is never a
+# session process. This also recognizes the daemon's pid-update-loop parent.
+fm_codex_app_server_process() {  # <comm> <args>
+  local base argv0
+  base=$(basename -- "$1")
+  case "$base" in codex|-codex) ;; *) return 1 ;; esac
+  argv0=${2%% *}
+  case "$argv0" in codex|-codex|*/codex) ;; *) return 1 ;; esac
+  case "$2" in "$argv0 app-server"|"$argv0 app-server "*) return 0 ;; esac
+  return 1
+}
+
+fm_codex_app_server_pid() {  # <pid>
+  local comm args
+  comm=$(ps -o comm= -p "$1" 2>/dev/null) || return 1
+  args=$(ps -o args= -p "$1" 2>/dev/null) || return 1
+  fm_codex_app_server_process "$comm" "$args"
+}
+
+# Desktop tool shells are children of a shared app-server, with no per-thread
+# process in their ancestry. A Codex CLI found before the server is its own
+# session and must keep using its pid. The environment id is accepted only from
+# a shell actually below an app-server, never from an unrelated inherited env.
+fm_codex_desktop_app_server_pid() {
+  local pid=$$ comm args
+  for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do
+    comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
+    args=$(ps -o args= -p "$pid" 2>/dev/null)
+    if fm_codex_app_server_process "$comm" "$args"; then
+      printf '%s\n' "$pid"
+      return 0
+    fi
+    fm_harness_process_matches "$comm" "$args" && return 1
+    pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
+    case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+    [ "$pid" -ge 1 ] || return 1
+  done
+  return 1
+}
+
+fm_codex_desktop_session_id() {
+  local id=${CODEX_THREAD_ID:-${CODEX_SESSION_ID:-}}
+  case "$id" in ''|*[!a-zA-Z0-9-]*) return 1 ;; esac
+  fm_codex_desktop_app_server_pid >/dev/null || return 1
+  printf '%s\n' "$id"
+}
+
+# The Desktop lease has one line:
+# v1 <app-server-pid> <session-id> <generation> <expiry-epoch>.
+# The pid keeps line 1 numeric for existing readers; the immutable generation
+# distinguishes sessions under that same shared pid.
+# The matching id and unexpired lease are the actual ownership evidence.
+# A pre-lease lock naming the same live daemon has no ownership evidence.
+FM_CODEX_DESKTOP_LEASE_SECONDS=43200
+FM_CODEX_LEASE_PID=
+FM_CODEX_LEASE_ID=
+FM_CODEX_LEASE_GENERATION=
+FM_CODEX_LEASE_EXPIRY=
+fm_codex_desktop_lease_matches() {  # <state> <lock-pid>
+  local file=$1/.lock-desktop-lease line version extra
+  FM_CODEX_LEASE_PID=
+  FM_CODEX_LEASE_ID=
+  FM_CODEX_LEASE_GENERATION=
+  FM_CODEX_LEASE_EXPIRY=
+  [ -f "$file" ] && [ ! -L "$file" ] || return 1
+  line=$(cat "$file" 2>/dev/null) || return 1
+  case "$line" in *$'\n'*) return 1 ;; esac
+  read -r version FM_CODEX_LEASE_PID FM_CODEX_LEASE_ID \
+    FM_CODEX_LEASE_GENERATION FM_CODEX_LEASE_EXPIRY extra <<< "$line"
+  [ "$version" = v1 ] && [ -z "$extra" ] || return 1
+  [ "$FM_CODEX_LEASE_PID" = "$2" ] || return 1
+  case "$FM_CODEX_LEASE_ID" in ''|*[!a-zA-Z0-9-]*) return 1 ;; esac
+  case "$FM_CODEX_LEASE_GENERATION" in ''|*[!a-zA-Z0-9.-]*) return 1 ;; esac
+  case "$FM_CODEX_LEASE_EXPIRY" in ''|*[!0-9]*) return 1 ;; esac
+  return 0
+}
+
+fm_codex_desktop_lease_live() {  # <state> <lock-pid>
+  local now
+  fm_codex_desktop_lease_matches "$1" "$2" || return 1
+  kill -0 "$2" 2>/dev/null || return 1
+  fm_codex_app_server_pid "$2" || return 1
+  now=$(date +%s) || return 1
+  # A malformed far-future expiry must never turn a bounded lease permanent.
+  [ "${#FM_CODEX_LEASE_EXPIRY}" -le 12 ] || return 1
+  [ "$now" -lt "$FM_CODEX_LEASE_EXPIRY" ] \
+    && [ "$FM_CODEX_LEASE_EXPIRY" -le "$((now + FM_CODEX_DESKTOP_LEASE_SECONDS))" ]
+}
+
+fm_session_lock_owner_live() {  # <state> <lock-pid>
+  if fm_codex_desktop_lease_matches "$1" "$2"; then
+    fm_codex_desktop_lease_live "$1" "$2"
+  else
+    fm_harness_pid_alive "$2"
+  fi
+}
+
+# Print the stable lock incarnation identity for readers that must reject a
+# replacement Desktop session even when the shared app-server pid is unchanged.
+# Other harnesses retain their exact pid identity.
+fm_session_lock_generation() {  # <state>
+  local pid
+  pid=$(cat "$1/.lock" 2>/dev/null) || return 1
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  if fm_codex_desktop_lease_matches "$1" "$pid"; then
+    fm_codex_desktop_lease_live "$1" "$pid" || return 1
+    printf '%s:%s\n' "$pid" "$FM_CODEX_LEASE_GENERATION"
+    return 0
+  fi
+  fm_codex_app_server_pid "$pid" && return 1
+  printf '%s\n' "$pid"
+}
+
 # Print the exact harness name carried by executable path $1 - its own basename
 # or any directory component - or return 1.
 #
@@ -68,6 +182,7 @@ FM_HARNESS_IS_CLAUDE=0
 fm_harness_process_matches() {  # <comm> <args>
   local comm=$1 args=$2 base argv0 name
   FM_HARNESS_IS_CLAUDE=0
+  fm_codex_app_server_process "$comm" "$args" && return 1
   base=$(basename -- "$comm")
   if printf '%s' "$base" | grep -qE "$FM_HARNESS_RE"; then
     case "$base" in *claude*) FM_HARNESS_IS_CLAUDE=1 ;; esac
@@ -118,6 +233,8 @@ fm_harness_ancestry_pids() {
   for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do
     comm=$(ps -o comm= -p "$pid" 2>/dev/null) || break
     args=$(ps -o args= -p "$pid" 2>/dev/null)
+    # Never walk through a shared app-server into an unrelated Codex process.
+    fm_codex_app_server_process "$comm" "$args" && break
     if fm_harness_process_matches "$comm" "$args"; then
       printf '%s\n' "$pid"
       printed=1
@@ -246,11 +363,17 @@ fm_session_lock_same_session() {  # <state> [<ancestry-pids>]
 # session, so "recorded pid dead" keeps meaning "session gone" instead of
 # wedging a home behind a live daemon whose session died. A replaced background
 # helper leaves a dead pid that its own session's next hook reclaims, because
-# the sidecar still names that session. Every other session records the
-# outermost pid of its contiguous run, exactly as before.
+# the sidecar still names that session. A Codex CLI anchors on its own process.
+# A Desktop session records the app-server pid only as a lock-generation marker;
+# its id and bounded lease below, rather than that shared pid, establish life.
+# Other harnesses keep the prior outermost-pid rule.
 fm_session_lock_anchor_pid() {
   local pids
-  pids=$(fm_harness_ancestry_pids) || return 1
+  if ! pids=$(fm_harness_ancestry_pids); then
+    fm_codex_desktop_session_id >/dev/null || return 1
+    fm_codex_desktop_app_server_pid
+    return
+  fi
   if fm_session_lock_trusted_session_id "$pids" >/dev/null; then
     printf '%s\n' "$CLAUDE_PID"
     return 0
@@ -271,11 +394,17 @@ fm_session_lock_anchor_pid() {
 # held by a harness outside this ancestry under another (or no) session id, or
 # an ancestry that cannot be resolved all fail closed.
 fm_session_lock_owned_by_self() {
-  local state=$1 lock_pid pids pid
+  local state=$1 lock_pid pids pid id
   lock_pid=$(cat "$state/.lock" 2>/dev/null || true)
   case "$lock_pid" in
     ''|*[!0-9]*) return 1 ;;
   esac
+  if fm_codex_desktop_lease_matches "$state" "$lock_pid"; then
+    fm_codex_desktop_lease_live "$state" "$lock_pid" || return 1
+    id=$(fm_codex_desktop_session_id) || return 1
+    [ "$id" = "$FM_CODEX_LEASE_ID" ]
+    return
+  fi
   pids=$(fm_harness_ancestry_pids) || return 1
   while IFS= read -r pid; do
     [ "$pid" = "$lock_pid" ] && return 0
@@ -294,13 +423,20 @@ EOF
 # shellcheck disable=SC2034 # Output global, read by the sourcing guard caller.
 FM_SESSION_LOCK_FOREIGN_OWNER_PID=
 fm_session_lock_foreign_owner_live() {
-  local state=$1 lock_pid pids pid
+  local state=$1 lock_pid pids pid id
   FM_SESSION_LOCK_FOREIGN_OWNER_PID=
   [ -f "$state/.lock" ] && [ ! -L "$state/.lock" ] || return 1
   lock_pid=$(cat "$state/.lock" 2>/dev/null || true)
   case "$lock_pid" in
     ''|*[!0-9]*) return 1 ;;
   esac
+  if fm_codex_desktop_lease_matches "$state" "$lock_pid"; then
+    fm_codex_desktop_lease_live "$state" "$lock_pid" || return 1
+    id=$(fm_codex_desktop_session_id 2>/dev/null || true)
+    [ "$id" = "$FM_CODEX_LEASE_ID" ] && return 1
+    FM_SESSION_LOCK_FOREIGN_OWNER_PID=$lock_pid
+    return 0
+  fi
   fm_harness_pid_alive "$lock_pid" || return 1
   pids=$(fm_harness_ancestry_pids) || return 1
   while IFS= read -r pid; do
@@ -322,9 +458,11 @@ EOF
 #   FM_LOCK_INSPECT_STATE         free|held|stale|unreadable|unknown
 #   FM_LOCK_INSPECT_PID           recorded pid, or empty
 #   FM_LOCK_INSPECT_LIVE_HARNESS  true|false|unknown
+#   FM_LOCK_INSPECT_KIND          pid|desktop
 #
 # held: the recorded pid is a live verified harness.
-# stale: the recorded pid is gone.
+# stale: the recorded pid is gone, or names a shared Codex app-server without
+# a fresh, matching Desktop lease.
 # unknown: the file or pid cannot be classified without guessing, including a
 # live process that is not a verified harness. Existence of a lock file, a
 # session record, or a pane is never treated as liveness.
@@ -332,6 +470,7 @@ EOF
 FM_LOCK_INSPECT_STATE=unknown
 FM_LOCK_INSPECT_PID=
 FM_LOCK_INSPECT_LIVE_HARNESS=unknown
+FM_LOCK_INSPECT_KIND=pid
 fm_session_lock_inspect() {  # <state>
   local state=$1 lock pid
   # shellcheck disable=SC2034 # Output globals, read by lock status and inbox ready.
@@ -340,6 +479,7 @@ fm_session_lock_inspect() {  # <state>
   FM_LOCK_INSPECT_PID=
   # shellcheck disable=SC2034 # Output globals, read by lock status and inbox ready.
   FM_LOCK_INSPECT_LIVE_HARNESS=unknown
+  FM_LOCK_INSPECT_KIND=pid
   lock="$state/.lock"
   if [ ! -e "$lock" ]; then
     FM_LOCK_INSPECT_STATE=free
@@ -363,10 +503,24 @@ fm_session_lock_inspect() {  # <state>
       return 0
       ;;
   esac
+  if fm_codex_desktop_lease_matches "$state" "$pid"; then
+    if fm_codex_desktop_lease_live "$state" "$pid"; then
+      FM_LOCK_INSPECT_STATE=held
+      FM_LOCK_INSPECT_LIVE_HARNESS=true
+      FM_LOCK_INSPECT_KIND=desktop
+    else
+      FM_LOCK_INSPECT_STATE=stale
+      FM_LOCK_INSPECT_LIVE_HARNESS=false
+    fi
+    return 0
+  fi
   if kill -0 "$pid" 2>/dev/null; then
     if fm_harness_pid_alive "$pid"; then
       FM_LOCK_INSPECT_STATE=held
       FM_LOCK_INSPECT_LIVE_HARNESS=true
+    elif fm_codex_app_server_pid "$pid"; then
+      FM_LOCK_INSPECT_STATE=stale
+      FM_LOCK_INSPECT_LIVE_HARNESS=false
     else
       FM_LOCK_INSPECT_STATE=unknown
       FM_LOCK_INSPECT_LIVE_HARNESS=false

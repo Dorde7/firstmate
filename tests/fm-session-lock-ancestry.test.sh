@@ -44,7 +44,9 @@ lib_eval() {  # <fakebin> <expression>
   local -a session_env=()
   [ -z "${FM_TEST_SESSION_ID:-}" ] || session_env+=("CLAUDE_CODE_SESSION_ID=$FM_TEST_SESSION_ID")
   [ -z "${FM_TEST_CLAUDE_PID:-}" ] || session_env+=("CLAUDE_PID=$FM_TEST_CLAUDE_PID")
-  env -u CLAUDE_CODE_SESSION_ID -u CLAUDE_PID ${session_env[@]+"${session_env[@]}"} \
+  [ -z "${FM_TEST_CODEX_ID:-}" ] || session_env+=("CODEX_SESSION_ID=$FM_TEST_CODEX_ID")
+  env -u CLAUDE_CODE_SESSION_ID -u CLAUDE_PID -u CODEX_SESSION_ID -u CODEX_THREAD_ID \
+    ${session_env[@]+"${session_env[@]}"} \
     PATH="$fakebin:$PATH" bash -c "
     . \"\$0\"
     kill() { return \${FM_TEST_KILL_RC:-0}; }
@@ -271,6 +273,219 @@ SH
   lib_eval "$fakebin" 'fm_harness_pid_alive 600' \
     || fail "a live competing version-named session was classified as a dead lock owner"
   pass "session-lock: a live version-named session holding the lock is not mistaken for a stale owner"
+}
+
+test_codex_app_server_is_not_a_session_lock_owner() {
+  local dir fakebin got
+  dir="$TMP_ROOT/codex-app-server"
+  fakebin=$(fm_fakebin "$dir")
+  mkdir -p "$dir/state"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+field= pid=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field=$2; shift 2 ;;
+    -p) pid=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "$pid:$field:${FM_TEST_CODEX_SESSION:-0}" in
+  900:comm=:*) printf '%s\n' codex ;;
+  900:args=:*) printf '%s\n' 'codex app-server --listen unix:// --managed-daemon' ;;
+  900:ppid=:*) printf '%s\n' 890 ;;
+  890:comm=:*) printf '%s\n' codex ;;
+  890:args=:*) printf '%s\n' 'codex app-server daemon pid-update-loop' ;;
+  890:ppid=:*) printf '%s\n' 1 ;;
+  910:comm=:*) printf '%s\n' codex ;;
+  910:args=:*) printf '%s\n' 'codex exec --model gpt-6-sol' ;;
+  910:ppid=:*) printf '%s\n' 900 ;;
+  *:comm=:*) printf '%s\n' bash ;;
+  *:args=:*) printf '%s\n' 'bash /repo/bin/fm-lock.sh' ;;
+  *:ppid=:1) printf '%s\n' 910 ;;
+  *:ppid=:*) printf '%s\n' 900 ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+  printf '900\n' > "$dir/state/.lock"
+
+  if lib_eval "$fakebin" 'fm_session_lock_anchor_pid' >/dev/null; then
+    fail "a Codex tool shell anchored its lock to the shared app-server daemon"
+  fi
+  if lib_eval "$fakebin" 'fm_harness_pid_alive 900'; then
+    fail "the managed app-server daemon was accepted as a live session lock owner"
+  fi
+  if lib_eval "$fakebin" 'fm_harness_pid_alive 890'; then
+    fail "the app-server pid-update-loop was accepted as a live session lock owner"
+  fi
+  got=$(lib_eval "$fakebin" "fm_session_lock_inspect '$dir/state'; printf '%s' \"\$FM_LOCK_INSPECT_STATE\"")
+  [ "$got" = stale ] || fail "a lock held by the shared app-server was '$got', expected stale"
+
+  # Desktop supplies a thread id while its shell has only the shared server as
+  # a Codex ancestor. The id plus a fresh lease, not daemon liveness, owns it.
+  got=$(FM_TEST_CODEX_ID=desktop-a lib_eval "$fakebin" 'fm_session_lock_anchor_pid') \
+    || fail "the Desktop session did not resolve a compatibility anchor"
+  [ "$got" = 900 ] || fail "the Desktop compatibility anchor was '$got', expected 900"
+  printf 'v1 900 desktop-a generation-a %s\n' "$(($(date +%s) + 43200))" > "$dir/state/.lock-desktop-lease"
+  got=$(lib_eval "$fakebin" "fm_session_lock_inspect '$dir/state'; printf '%s' \"\$FM_LOCK_INSPECT_STATE\"")
+  [ "$got" = held ] || fail "a fresh Desktop lease was '$got', expected held"
+  got=$(lib_eval "$fakebin" "fm_session_lock_generation '$dir/state'") \
+    || fail "a fresh Desktop lease had no lock generation"
+  [ "$got" = 900:generation-a ] || fail "Desktop lock generation was '$got'"
+  FM_TEST_CODEX_ID=desktop-a lib_eval "$fakebin" "fm_session_lock_owned_by_self '$dir/state'" \
+    || fail "the Desktop session did not own its fresh lease"
+  if FM_TEST_CODEX_ID=desktop-b lib_eval "$fakebin" "fm_session_lock_owned_by_self '$dir/state'"; then
+    fail "another Desktop session claimed the first session's lease"
+  fi
+  printf 'v1 900 desktop-a generation-a %s\n' "$(($(date +%s) - 1))" > "$dir/state/.lock-desktop-lease"
+  got=$(lib_eval "$fakebin" "fm_session_lock_inspect '$dir/state'; printf '%s' \"\$FM_LOCK_INSPECT_STATE\"")
+  [ "$got" = stale ] || fail "an expired Desktop lease was '$got', expected stale"
+  if lib_eval "$fakebin" "fm_session_lock_generation '$dir/state'" >/dev/null; then
+    fail "an expired Desktop lease retained a live lock generation"
+  fi
+  if FM_TEST_CODEX_ID=desktop-a lib_eval "$fakebin" "fm_session_lock_owned_by_self '$dir/state'"; then
+    fail "the old Desktop session still owned its expired lease"
+  fi
+
+  got=$(FM_TEST_CODEX_SESSION=1 lib_eval "$fakebin" 'fm_session_lock_anchor_pid') \
+    || fail "the per-session Codex CLI was not found"
+  [ "$got" = 910 ] || fail "the per-session Codex CLI anchored '$got', expected 910"
+  got=$(FM_TEST_CODEX_SESSION=1 FM_TEST_CODEX_ID=desktop-a \
+    lib_eval "$fakebin" 'fm_session_lock_anchor_pid') \
+    || fail "the Codex CLI lost its process anchor after inheriting a Desktop id"
+  [ "$got" = 910 ] || fail "an inherited Desktop id changed the Codex CLI anchor to '$got'"
+  FM_TEST_CODEX_SESSION=1 lib_eval "$fakebin" 'fm_harness_pid_alive 910' \
+    || fail "the per-session Codex CLI was not a live lock owner"
+  pass "session-lock: shared Codex app-server processes are stale; a per-session Codex CLI remains live"
+}
+
+test_codex_desktop_lock_lease_acquire_and_reclaim() {
+  local dir fakebin app_pid out renewed_expiry generation renewed_generation
+  dir="$TMP_ROOT/codex-desktop-lease"
+  fakebin=$(fm_fakebin "$dir")
+  mkdir -p "$dir/state"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+field= pid=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field=$2; shift 2 ;;
+    -p) pid=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+if [ "$pid" = "$FM_TEST_APP_PID" ]; then
+  case "$field" in
+    comm=) printf '%s\n' codex ;;
+    args=) printf '%s\n' 'codex app-server --listen unix:// --managed-daemon' ;;
+    ppid=) printf '%s\n' 1 ;;
+  esac
+else
+  case "$field" in
+    comm=) printf '%s\n' bash ;;
+    args=) printf '%s\n' 'bash /repo/bin/fm-lock.sh' ;;
+    ppid=) printf '%s\n' "$FM_TEST_APP_PID" ;;
+  esac
+fi
+SH
+  chmod +x "$fakebin/ps"
+  sleep 120 &
+  app_pid=$!
+  BG_FIXTURE_PIDS+=("$app_pid")
+  printf '%s\n' "$app_pid" > "$dir/state/.lock"
+  out=$(FM_TEST_APP_PID="$app_pid" PATH="$fakebin:$PATH" FM_HOME="$dir" \
+    "$ROOT/bin/fm-lock.sh" status)
+  [[ "$out" = lock:\ stale* ]] || fail "legacy daemon lock was not stale: $out"
+
+  out=$(FM_TEST_APP_PID="$app_pid" PATH="$fakebin:$PATH" FM_HOME="$dir" \
+    CODEX_SESSION_ID=desktop-a CODEX_THREAD_ID=desktop-a "$ROOT/bin/fm-lock.sh") \
+    || fail "Desktop session could not reclaim the legacy daemon lock: $out"
+  [ "$(cat "$dir/state/.lock")" = "$app_pid" ] || fail "Desktop lock changed the compatibility pid"
+  [ -f "$dir/state/.lock-desktop-lease" ] || fail "Desktop acquisition wrote no lease"
+  read -r _ _ _ generation _ < "$dir/state/.lock-desktop-lease"
+  FM_TEST_APP_PID="$app_pid" PATH="$fakebin:$PATH" FM_HOME="$dir" \
+    FM_SUPERVISION_ACTOR=branch "$ROOT/bin/fm-lease.sh" claim demo \
+    || fail "the first Desktop session could not claim its task lease"
+  out=$(FM_TEST_APP_PID="$app_pid" PATH="$fakebin:$PATH" FM_HOME="$dir" \
+    "$ROOT/bin/fm-lease.sh" check demo)
+  [[ "$out" = branch\ *\ live ]] || fail "the first Desktop task lease was not live: $out"
+  out=$(FM_TEST_APP_PID="$app_pid" PATH="$fakebin:$PATH" FM_HOME="$dir" \
+    "$ROOT/bin/fm-lock.sh" status)
+  [[ "$out" = lock:\ held* ]] || fail "fresh Desktop lock was not held: $out"
+
+  printf 'v1 %s desktop-a %s %s\n' "$app_pid" "$generation" "$(($(date +%s) + 60))" > "$dir/state/.lock-desktop-lease"
+  FM_TEST_APP_PID="$app_pid" PATH="$fakebin:$PATH" FM_HOME="$dir" \
+    CODEX_SESSION_ID=desktop-a CODEX_THREAD_ID=desktop-a \
+    "$ROOT/bin/fm-lock.sh" renew > "$dir/renew.out" 2>&1 \
+    || fail "the owning Desktop session could not renew its lease: $(cat "$dir/renew.out")"
+  read -r _ _ _ renewed_generation renewed_expiry < "$dir/state/.lock-desktop-lease"
+  [ "$renewed_generation" = "$generation" ] || fail "renew changed the Desktop lock generation"
+  [ "$renewed_expiry" -gt "$(($(date +%s) + 36000))" ] \
+    || fail "renew did not extend the Desktop lease"
+
+  mkdir -p "$dir/bin"
+  cp "$ROOT/bin/fm-watch-checkpoint.sh" "$ROOT/bin/fm-lock.sh" \
+    "$ROOT/bin/fm-session-lock-lib.sh" "$ROOT/bin/fm-cursor-lib.sh" \
+    "$ROOT/bin/fm-wake-lib.sh" "$dir/bin/"
+  cat > "$dir/bin/fm-watch.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'check: fixture wake\n'
+SH
+  chmod +x "$dir/bin/fm-watch.sh"
+  printf 'v1 %s desktop-a %s %s\n' "$app_pid" "$generation" "$(($(date +%s) + 60))" > "$dir/state/.lock-desktop-lease"
+  FM_TEST_APP_PID="$app_pid" PATH="$fakebin:$PATH" FM_HOME="$dir" \
+    CODEX_SESSION_ID=desktop-a CODEX_THREAD_ID=desktop-a \
+    "$dir/bin/fm-watch-checkpoint.sh" --seconds 1 > "$dir/checkpoint.out" 2>&1 \
+    || fail "the foreground checkpoint failed: $(cat "$dir/checkpoint.out")"
+  grep -q '^check: fixture wake$' "$dir/checkpoint.out" \
+    || fail "the foreground checkpoint did not pass through its wake"
+  read -r _ _ _ renewed_generation renewed_expiry < "$dir/state/.lock-desktop-lease"
+  [ "$renewed_generation" = "$generation" ] || fail "checkpoint changed the Desktop lock generation"
+  [ "$renewed_expiry" -gt "$(($(date +%s) + 36000))" ] \
+    || fail "the foreground checkpoint did not refresh the Desktop lease"
+
+  if FM_TEST_APP_PID="$app_pid" PATH="$fakebin:$PATH" FM_HOME="$dir" \
+    CODEX_SESSION_ID=desktop-b CODEX_THREAD_ID=desktop-b \
+    "$ROOT/bin/fm-lock.sh" > "$dir/foreign.out" 2>&1; then
+    fail "a different Desktop session took the fresh lease"
+  fi
+  grep -q 'another live firstmate session' "$dir/foreign.out" \
+    || fail "foreign Desktop session was refused for the wrong reason: $(cat "$dir/foreign.out")"
+  if FM_TEST_APP_PID="$app_pid" PATH="$fakebin:$PATH" FM_HOME="$dir" \
+    CODEX_SESSION_ID=desktop-b CODEX_THREAD_ID=desktop-b \
+    "$ROOT/bin/fm-lock.sh" renew > "$dir/foreign-renew.out" 2>&1; then
+    fail "another Desktop session renewed the first session's lease"
+  fi
+
+  printf 'v1 %s desktop-a %s %s\n' "$app_pid" "$generation" "$(($(date +%s) - 1))" > "$dir/state/.lock-desktop-lease"
+  out=$(FM_TEST_APP_PID="$app_pid" PATH="$fakebin:$PATH" FM_HOME="$dir" \
+    "$ROOT/bin/fm-lock.sh" status)
+  [[ "$out" = lock:\ stale* ]] || fail "expired Desktop lock was not stale: $out"
+  if FM_TEST_APP_PID="$app_pid" PATH="$fakebin:$PATH" FM_HOME="$dir" \
+    CODEX_SESSION_ID=desktop-a CODEX_THREAD_ID=desktop-a \
+    "$dir/bin/fm-watch-checkpoint.sh" --seconds 1 > "$dir/expired-checkpoint.out" 2>&1; then
+    fail "an expired Desktop session continued its foreground checkpoint"
+  fi
+  if grep -q '^check: fixture wake$' "$dir/expired-checkpoint.out"; then
+    fail "the expired Desktop session reached the watcher after renewal failed"
+  fi
+  FM_TEST_APP_PID="$app_pid" PATH="$fakebin:$PATH" FM_HOME="$dir" \
+    CODEX_SESSION_ID=desktop-b CODEX_THREAD_ID=desktop-b \
+    "$ROOT/bin/fm-lock.sh" > "$dir/reclaim.out" 2>&1 \
+    || fail "another Desktop session could not reclaim the expired lease: $(cat "$dir/reclaim.out")"
+  grep -q "v1 $app_pid desktop-b " "$dir/state/.lock-desktop-lease" \
+    || fail "expired lease was not replaced by desktop-b"
+  read -r _ _ _ renewed_generation _ < "$dir/state/.lock-desktop-lease"
+  [ "$renewed_generation" != "$generation" ] || fail "a new Desktop session reused the old generation"
+  out=$(FM_TEST_APP_PID="$app_pid" PATH="$fakebin:$PATH" FM_HOME="$dir" \
+    "$ROOT/bin/fm-lease.sh" check demo)
+  [[ "$out" = branch\ *\ stale ]] || fail "the prior Desktop task lease stayed live after replacement: $out"
+  FM_TEST_APP_PID="$app_pid" PATH="$fakebin:$PATH" FM_HOME="$dir" \
+    FM_SUPERVISION_ACTOR=main "$ROOT/bin/fm-lease.sh" claim demo \
+    || fail "the replacement Desktop session could not claim the stale task lease"
+  pass "session-lock e2e: Desktop lease protects a live session and allows stale daemon recovery"
 }
 
 # A background Claude session's process table. The hook fires inside
@@ -1098,6 +1313,8 @@ test_harness_at_namespace_pid1_is_examined
 test_ordinary_paths_are_never_harness_processes
 test_harness_beyond_a_gap_never_owns_the_lock
 test_competing_version_named_session_is_seen_as_live
+test_codex_app_server_is_not_a_session_lock_owner
+test_codex_desktop_lock_lease_acquire_and_reclaim
 test_same_session_id_owns_a_recycled_background_chain
 test_anchor_pid_is_the_model_loop_process_only_for_a_trusted_id
 test_e2e_version_named_session_claims_the_home
