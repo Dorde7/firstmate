@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 # Perform the approved local merge for a local-only ship task: fast-forward the
-# project's default branch to the crewmate's immutable ship branch recorded in
+# project's local landing branch to the crewmate's immutable ship branch recorded in
 # state/<task-id>.meta ("fm/<id>" for records created before that field existed).
+# The landing branch is the meta's landing_branch=, recorded at spawn from the
+# mirror primary's checked-out branch, never origin/HEAD; the merge refuses when
+# the primary is no longer on it (bin/fm-local-default-branch-lib.sh).
 #
 # This is firstmate's merge gate-action (the captain's merge authority applied
 # locally instead of via a GitHub PR). It is the one sanctioned exception to hard

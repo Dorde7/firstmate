@@ -244,10 +244,19 @@
 #   task worktree. When an origin configuration is detected, spawn fetches it,
 #   resolves the current remote default branch, and resets to its tip. When none
 #   is detected, spawn skips that remote freshness check and launches from the
-#   clean worktree's current HEAD. Relaunch reuses the recorded worktree without
-#   fetching or resetting its base. An unreachable detected origin, unresolved
-#   default branch, or non-clean worktree refuses a fresh spawn rather than
-#   risking a PR based on stale history or discarding local work.
+#   clean worktree's current HEAD. A local-only mirror's origin may be the
+#   captain's live checkout, so a mode=local-only ship (and a scout on a project
+#   registered local-only, since a scout has no recorded mode) never fetches or
+#   set-heads origin: it resets to the mirror's local landing branch instead.
+#   A ship resolves that branch once from the mirror primary's checked-out
+#   branch, refusing a detached, unborn, or fm/* task branch, and records it as
+#   landing_branch= for bin/fm-merge-local.sh and bin/fm-teardown.sh; every
+#   later use refuses when the primary is no longer on the recorded branch
+#   (bin/fm-local-default-branch-lib.sh owns the rule). Relaunch reuses the
+#   recorded worktree without fetching or resetting its base. An unreachable
+#   detected origin, unresolved default or landing branch, or non-clean worktree
+#   refuses a fresh spawn rather than risking a PR based on stale history or
+#   discarding local work.
 #   A slot whose only deviation is a stale submodule gitlink is refused by that
 #   same clean check, but is reported as a stale checkout naming each submodule
 #   and both pins; nothing is converged or removed, and no remedy is suggested.
