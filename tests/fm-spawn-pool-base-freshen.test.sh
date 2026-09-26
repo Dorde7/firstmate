@@ -248,6 +248,38 @@ test_local_only_pool_uses_mirror_default_not_live_origin_head() {
   pass "local-only spawn uses mirror master and preserves origin/HEAD when origin is a live checkout"
 }
 
+test_local_only_scout_uses_mirror_checkout_not_live_origin_head() {
+  local rec id out status live_origin local_default origin_head
+  id='pool-local-only-scout-r1'
+  rec=$(make_case local-only-scout "$id" master)
+  read_case_record "$rec"
+  live_origin="$CASE_DIR/live-origin"
+  git clone --quiet "file://$CASE_DIR/origin.git" "$live_origin"
+  git -C "$live_origin" checkout --quiet -b feature/review
+  printf 'feature branch only\n' > "$live_origin/feature.txt"
+  git -C "$live_origin" add feature.txt
+  git -C "$live_origin" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm feature
+
+  printf 'local landing\n' > "$PROJECT_DIR/local.txt"
+  git -C "$PROJECT_DIR" add local.txt
+  git -C "$PROJECT_DIR" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm local-landing
+  local_default=$(git -C "$PROJECT_DIR" rev-parse refs/heads/master)
+  git -C "$PROJECT_DIR" remote set-url origin "file://$live_origin"
+  git -C "$PROJECT_DIR" fetch --quiet origin
+  git -C "$PROJECT_DIR" remote set-head origin master
+  origin_head=$(git -C "$PROJECT_DIR" symbolic-ref refs/remotes/origin/HEAD)
+  printf '%s\n' '- project [local-only] - test fixture (added 2026-09-26)' > "$HOME_DIR/data/projects.md"
+
+  out=$(run_spawn "$id" --scout)
+  status=$?
+  expect_code 0 "$status" "a scout on a local-only project should launch from the mirror checkout"$'\n'"$out"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$local_default" ] \
+    || fail "a scout on a local-only project based the pool on the live origin checkout instead of local master"
+  [ "$(git -C "$PROJECT_DIR" symbolic-ref refs/remotes/origin/HEAD)" = "$origin_head" ] \
+    || fail "a scout on a local-only project rewrote the mirror's origin/HEAD"
+  pass "a scout on a local-only project uses the mirror checkout and preserves origin/HEAD"
+}
+
 test_local_only_pool_uses_checked_out_branch_over_stale_main() {
   local rec id out status local_default
   id='pool-local-only-stale-main-r1'
@@ -803,6 +835,7 @@ test_stale_pool_base_refreshes_before_branching
 test_non_main_default_branch_refreshes_before_branching
 test_local_only_pool_uses_mirror_default_not_live_origin_head
 test_local_only_pool_uses_checked_out_branch_over_stale_main
+test_local_only_scout_uses_mirror_checkout_not_live_origin_head
 test_direct_pr_and_scout_refresh_before_launch
 test_dirty_pool_refuses_without_discarding_work
 test_unresolved_remote_default_refuses_pool

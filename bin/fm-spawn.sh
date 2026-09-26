@@ -3256,7 +3256,7 @@ spawn_worktree_has_origin_config() { # <worktree>
 }
 
 freshen_spawn_worktree_base() { # <worktree>
-  local worktree=$1 default target expected actual status
+  local worktree=$1 default target expected actual status posture mirror_local_only
   status=$(git -C "$worktree" -c core.quotePath=false status --porcelain) || {
     echo "error: could not inspect pooled worktree '$worktree' before refreshing its base" >&2
     return 1
@@ -3269,7 +3269,18 @@ freshen_spawn_worktree_base() { # <worktree>
     fi
     return 1
   fi
-  if fm_is_local_only_task "$MODE"; then
+  # Ships decide from their recorded mode; a scout has none, so it follows the registered posture.
+  mirror_local_only=0
+  case "$KIND" in
+    ship)
+      if fm_is_local_only_task "$MODE"; then mirror_local_only=1; fi
+      ;;
+    scout)
+      posture=$("$FM_ROOT/bin/fm-project-mode.sh" --raw "$(basename "$PROJ_ABS")" 2>/dev/null) || posture=
+      if fm_is_local_only_task "${posture%% *}"; then mirror_local_only=1; fi
+      ;;
+  esac
+  if [ "$mirror_local_only" = 1 ]; then
     default=$(fm_local_default_branch "$PROJ_ABS") || {
       echo "error: could not determine the mirror's local default branch for pooled worktree '$worktree'; refusing to launch" >&2
       return 1
