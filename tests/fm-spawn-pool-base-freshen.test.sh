@@ -248,6 +248,26 @@ test_local_only_pool_uses_mirror_default_not_live_origin_head() {
   pass "local-only spawn uses mirror master and preserves origin/HEAD when origin is a live checkout"
 }
 
+test_local_only_pool_uses_checked_out_branch_over_stale_main() {
+  local rec id out status local_default
+  id='pool-local-only-stale-main-r1'
+  rec=$(make_case local-only-stale-main "$id" master)
+  read_case_record "$rec"
+  printf 'local landing\n' > "$PROJECT_DIR/local.txt"
+  git -C "$PROJECT_DIR" add local.txt
+  git -C "$PROJECT_DIR" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm local-landing
+  local_default=$(git -C "$PROJECT_DIR" rev-parse refs/heads/master)
+  git -C "$PROJECT_DIR" branch main "$INITIAL_SHA"
+  printf '%s\n' '- project [local-only] - test fixture (added 2026-09-26)' > "$HOME_DIR/data/projects.md"
+
+  out=$(run_spawn "$id" --mode local-only --yolo off)
+  status=$?
+  expect_code 0 "$status" "local-only spawn should launch from the mirror's checked-out branch"$'\n'"$out"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$local_default" ] \
+    || fail "local-only spawn based the pool on a stale main instead of the checked-out master"
+  pass "local-only spawn uses the mirror's checked-out branch even when a stale main exists"
+}
+
 make_originless_case() {  # <name> <id>
   local name=$1 id=$2 case_dir home project pool fakebin initial
   case_dir="$TMP_ROOT/$name"
@@ -782,6 +802,7 @@ test_linked_spawning_home_rejects_primary_before_refresh
 test_stale_pool_base_refreshes_before_branching
 test_non_main_default_branch_refreshes_before_branching
 test_local_only_pool_uses_mirror_default_not_live_origin_head
+test_local_only_pool_uses_checked_out_branch_over_stale_main
 test_direct_pr_and_scout_refresh_before_launch
 test_dirty_pool_refuses_without_discarding_work
 test_unresolved_remote_default_refuses_pool

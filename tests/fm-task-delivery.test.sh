@@ -494,6 +494,55 @@ EOF
   pass "fm-merge-local: a registry change cannot redirect an in-flight local-only task"
 }
 
+test_local_merge_lands_on_the_mirror_checkout_regardless_of_registry() {
+  local registry home proj id fix out
+  for registry in removed direct-pr stale-main; do
+    home="$TMP_ROOT/local-merge-mirror-$registry/home"
+    proj="$TMP_ROOT/local-merge-mirror-$registry/proj"
+    id="local-merge-mirror-$registry"
+    mkdir -p "$home/state" "$home/data" "$proj"
+    git -C "$proj" init -q -b master || fail "could not initialize $registry mirror fixture"
+    git -C "$proj" config user.email test@example.com
+    git -C "$proj" config user.name test
+    printf 'base\n' > "$proj/base"
+    git -C "$proj" add base || fail "could not stage $registry mirror fixture base"
+    git -C "$proj" commit -qm base || fail "could not commit $registry mirror fixture base"
+    git -C "$proj" update-ref refs/remotes/origin/feature/review HEAD
+    git -C "$proj" symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/feature/review
+    git -C "$proj" checkout -qb "fix/$id" || fail "could not create $registry task branch"
+    printf 'change\n' > "$proj/change"
+    git -C "$proj" add change || fail "could not stage $registry task change"
+    git -C "$proj" commit -qm change || fail "could not commit $registry task change"
+    fix=$(git -C "$proj" rev-parse HEAD)
+    git -C "$proj" checkout -q master || fail "could not restore $registry mirror checkout"
+    case "$registry" in
+      removed) : > "$home/data/projects.md" ;;
+      direct-pr)
+        printf -- '- %s [direct-pr] - changed after task intake (added 2026-09-26)\n' \
+          "$(basename "$proj")" > "$home/data/projects.md"
+        ;;
+      stale-main)
+        git -C "$proj" branch main master~0 || fail "could not create stale main"
+        git -C "$proj" commit -q --allow-empty -m landing-advance || fail "could not advance master"
+        git -C "$proj" checkout -q "fix/$id" && git -C "$proj" rebase -q master >/dev/null \
+          || fail "could not rebase task branch onto advanced master"
+        fix=$(git -C "$proj" rev-parse HEAD)
+        git -C "$proj" checkout -q master || fail "could not restore mirror checkout"
+        printf -- '- %s [local-only] - test fixture (added 2026-09-26)\n' \
+          "$(basename "$proj")" > "$home/data/projects.md"
+        ;;
+    esac
+    printf 'project=%s\nmode=local-only\nbranch=fix/%s\n' "$proj" "$id" > "$home/state/$id.meta"
+    out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$MERGE_LOCAL" "$id" 2>&1) \
+      || fail "local merge ($registry) did not land on the mirror checkout: $out"
+    [ "$(git -C "$proj" rev-parse refs/heads/master)" = "$fix" ] \
+      || fail "local merge ($registry) did not fast-forward the mirror's checked-out master"
+    assert_contains "$out" "merged fix/$id into local master" \
+      "local merge ($registry) did not report landing on master"
+  done
+  pass "fm-merge-local: a local-only task lands on the mirror checkout whatever the registry or a stale main says"
+}
+
 # A registered name may contain spaces, and the lookup must match the whole
 # name rather than only its first whitespace-delimited token (issue #1977).
 # The longer "foo bar" row is listed before the "foo" row so a leading-prefix
@@ -1628,6 +1677,7 @@ test_promotion_delivers_the_real_definition_of_done
 test_promotion_persists_the_selected_ship_branch
 test_promotion_branch_command_is_shell_safe
 test_local_merge_uses_the_recorded_ship_branch
+test_local_merge_lands_on_the_mirror_checkout_regardless_of_registry
 test_project_mode_matches_whole_multiword_names
 test_project_mode_maps_the_conditional_policy
 test_project_mode_binds_the_forge_orthogonally

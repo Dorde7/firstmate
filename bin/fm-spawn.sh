@@ -3269,8 +3269,8 @@ freshen_spawn_worktree_base() { # <worktree>
     fi
     return 1
   fi
-  if fm_is_local_only_project_task "$PROJ_ABS" "$MODE"; then
-    default=$(fm_local_default_branch "$worktree") || {
+  if fm_is_local_only_task "$MODE"; then
+    default=$(fm_local_default_branch "$PROJ_ABS") || {
       echo "error: could not determine the mirror's local default branch for pooled worktree '$worktree'; refusing to launch" >&2
       return 1
     }

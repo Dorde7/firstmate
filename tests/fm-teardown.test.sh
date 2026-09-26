@@ -765,7 +765,7 @@ test_local_only_merged_to_local_main_allows() {
   local case_dir rc
   case_dir=$(make_case merged-main)
   write_meta "$case_dir" local-only ship
-  printf '%s\n' '- project [local-only] - test fixture (added 2026-09-26)' > "$case_dir/data/projects.md"
+  printf '%s\n' '- project [direct-pr] - changed after task intake (added 2026-09-26)' > "$case_dir/data/projects.md"
   git -C "$case_dir/project" update-ref refs/remotes/origin/feature/review \
     "$(git -C "$case_dir/project" rev-parse refs/heads/main)"
   git -C "$case_dir/project" symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/feature/review

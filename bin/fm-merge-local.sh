@@ -82,7 +82,7 @@ MODE=$(grep '^mode=' "$META" | cut -d= -f2- || true)
 
 default_branch() {
   local ref branch
-  if fm_is_local_only_project_task "$PROJ" "$MODE"; then
+  if fm_is_local_only_task "$MODE"; then
     fm_local_default_branch "$PROJ"
     return
   fi
