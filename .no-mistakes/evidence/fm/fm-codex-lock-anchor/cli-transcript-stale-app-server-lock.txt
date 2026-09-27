@@ -1,0 +1,14 @@
+$ ps -o pid,args -p 57366
+  PID ARGS
+57366 codex app-server --stdio
+
+# legacy lock left behind by an ended Codex firstmate session, naming the shared app-server
+$ echo 57366 > state/.lock
+$ bin/fm-lock.sh status
+lock: stale (pid 57366 dead or not a harness)
+(exit 0)
+
+# base commit (8c5493a) behaviour for comparison:
+$ (base) bin/fm-lock.sh status
+lock: held by live harness pid 57366
+(exit 0)
