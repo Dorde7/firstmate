@@ -27,8 +27,8 @@
 # FM_REMOTE_JOB_POLL_SECONDS for 20 passes, then blocks on its worker.wake FIFO
 # for up to one second without forking. The library's nudge on staging,
 # cancellation, and lane exit ends that wait at once, and a burst of nudges
-# coalesces into one pending wake, so it restarts that short window once
-# rather than once per nudge; the bound alone still
+# coalesces into the one wake byte a nudge may have pending, so it restarts
+# that short window once rather than once per nudge; the bound alone still
 # finds a lane that died without nudging, an orphaned claim, and an expired
 # queue deadline. Without a usable FIFO the loop sleeps that same second
 # between idle passes instead. Either way the readiness heartbeat is refreshed
@@ -1125,11 +1125,11 @@ worker_process_once() { # <account-home>
 }
 
 # Open this worker's wake FIFO read-write on fd 8, replacing anything else at
-# its path or its pending marker's. Holding both ends means the idle read never
-# sees end-of-file and a nudge written while this worker is busy waits in the
-# pipe. The marker is emptied only once the FIFO is held, so a nudge a previous
-# holder never consumed cannot leave it set with no byte to clear it. Without
-# the FIFO the loop falls back to sleeping out the idle bound.
+# its path. Holding both ends means the idle read never sees end-of-file and a
+# nudge written while this worker is busy waits in the pipe. A stale pending
+# marker is removed only once the FIFO is held, so a claim whose byte went to no
+# holder cannot outlive it and silence every later nudge. Without the FIFO the
+# loop falls back to sleeping out the idle bound.
 worker_open_wake() {
   local wake pending
   wake=$(fm_remote_job_worker_wake_path)
@@ -1137,24 +1137,22 @@ worker_open_wake() {
   if [ -L "$wake" ] || { [ -e "$wake" ] && [ ! -p "$wake" ]; }; then
     rm -f -- "$wake" 2>/dev/null || return 1
   fi
-  if [ -L "$pending" ] || { [ -e "$pending" ] && [ ! -f "$pending" ]; }; then
-    rm -f -- "$pending" 2>/dev/null || return 1
-  fi
   if [ ! -p "$wake" ]; then
     (umask 077; mkfifo "$wake") 2>/dev/null || return 1
   fi
   [ -p "$wake" ] && [ ! -L "$wake" ] || return 1
   exec 8<> "$wake" || return 1
-  (umask 077; : > "$pending") 2>/dev/null || { exec 8<&-; return 1; }
   WORKER_WAKE_PENDING=$pending
+  worker_clear_wake || { exec 8<&-; return 1; }
   WORKER_WAKE_OPEN=1
 }
 
-# Clear the pending marker after consuming a wake byte and before the rescan,
-# so a nudge that saw it set relies on a pass that has not yet looked.
+# Remove the pending marker so the next nudge can claim it. After a consumed
+# wake byte this runs before the rescan, so a nudge that lost the claim relies
+# on a pass that has not yet looked.
 worker_clear_wake() {
-  [ -f "$WORKER_WAKE_PENDING" ] && [ ! -L "$WORKER_WAKE_PENDING" ] || return 0
-  { : > "$WORKER_WAKE_PENDING"; } 2>/dev/null || true
+  [ -e "$WORKER_WAKE_PENDING" ] || [ -L "$WORKER_WAKE_PENDING" ] || return 0
+  rm -f -- "$WORKER_WAKE_PENDING" 2>/dev/null
 }
 
 # Wait for the next pass: poll quickly for a short window after activity so a
@@ -1162,7 +1160,9 @@ worker_clear_wake() {
 # starts, otherwise block on the wake FIFO up to the idle bound, or sleep it
 # out when there is no FIFO. A read that returns early without a byte and
 # without a second elapsing cannot be the timeout, so the descriptor is
-# unusable and the loop falls back to sleeping rather than spinning.
+# unusable and the loop falls back to sleeping rather than spinning. A marker
+# still claimed after a full idle bound with no byte belongs to a nudge that
+# died between claiming and writing, so the timeout releases it.
 worker_wait_for_work() {
   local started byte
   if [ "$WORKER_ACTIVITY" -eq 1 ]; then
@@ -1181,14 +1181,16 @@ worker_wait_for_work() {
   started=$SECONDS
   if IFS= read -r -t "$WORKER_IDLE_WAIT_SECONDS" -n 1 byte <&8; then
     : "$byte"
-    worker_clear_wake
+    worker_clear_wake || true
     WORKER_ACTIVITY=1
     return 0
   fi
   if [ "$SECONDS" -eq "$started" ]; then
     exec 8<&- 2>/dev/null || true
     WORKER_WAKE_OPEN=0
+    return 0
   fi
+  worker_clear_wake || true
   return 0
 }
 

@@ -1153,16 +1153,20 @@ quiet_heartbeat_stays_fresh "$QUIET_STATE" "$QUIET_HOME" idle
 pass "an idle worker keeps its readiness heartbeat fresh while blocked"
 
 # Publishers never block on a worker that is not reading: with the worker
-# stopped, a burst of nudges well past the FIFO's pipe capacity and a staging
-# all return promptly. Resumed, the worker claims the staged job, and the burst
-# coalesced into one wake, so it settles back to its quiet idle wait instead of
-# one fast-poll window per nudge.
+# stopped, concurrent bursts of nudges well past the FIFO's pipe capacity and a
+# staging all return promptly and leave at most one wake byte buffered. Resumed,
+# the worker claims the staged job, and the burst coalesced into one wake, so
+# it settles back to its quiet idle wait instead of one fast-poll window per
+# nudge.
 quiet_stopped_burst() { # <state> <account-home> <touched> <label>
-  local burst_pid deadline began elapsed
+  local burst_pid deadline began elapsed buffered
   kill -STOP "$QUIET_WORKER_PID"
   (
     FM_REMOTE_JOB_STATE="$1"
-    for _ in $(seq 1 10000); do fm_remote_job_wake_worker; done
+    for _ in $(seq 1 20); do
+      ( for _ in $(seq 1 500); do fm_remote_job_wake_worker; done ) &
+    done
+    wait
     FM_REMOTE_JOB_STATE_ROOT="$1"
     FM_REMOTE_JOB_QUEUE_TIMEOUT=60
     FM_REMOTE_JOB_TIMEOUT=30
@@ -1179,6 +1183,14 @@ quiet_stopped_burst() { # <state> <account-home> <touched> <label>
     fail "nudges and staging blocked on the stopped $4 worker"
   fi
   wait "$burst_pid" || { kill -CONT "$QUIET_WORKER_PID"; fail "staging to the stopped $4 worker failed"; }
+  buffered=$(
+    exec 9<> "$1/worker.wake"
+    count=0
+    while IFS= read -r -t 1 -n 1 _ <&9; do count=$((count + 1)); done
+    [ "$count" -eq 0 ] || printf 'w' >&9
+    printf '%s\n' "$count"
+  )
+  [ "$buffered" -le 1 ] || { kill -CONT "$QUIET_WORKER_PID"; fail "the burst left $buffered wake bytes buffered for the stopped $4 worker"; }
   kill -CONT "$QUIET_WORKER_PID"
   began=$SECONDS
   (

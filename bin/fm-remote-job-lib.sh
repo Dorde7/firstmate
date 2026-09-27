@@ -58,11 +58,11 @@
 # Staging, cancellation, and a lane finishing its job each nudge the serving
 # worker through its worker.wake FIFO, so an idle worker can block without
 # forking and still claim new work as soon as it is published. A nudge writes
-# its byte only while the worker's worker.wake.pending marker is empty, and the
-# worker empties that marker after consuming a byte and before rescanning, so a
-# burst coalesces into one pending wake and the pipe can never fill. A missing
-# or foreign wake FIFO or marker only delays pickup to the worker's idle bound;
-# the nudge never blocks or fails its caller.
+# its byte only after exclusively creating the worker.wake.pending marker, and
+# the worker removes that marker after consuming a byte and before rescanning,
+# so a burst - concurrent or not - coalesces into one pending byte and the pipe
+# can never fill. A missing or foreign wake FIFO or marker only delays pickup to
+# the worker's idle bound; the nudge never blocks or fails its caller.
 #
 # The worker accepts only a tracked, non-symlink executable named fm-*.sh below
 # its configured FM_ROOT/bin. Every child receives env -i with the composed
@@ -595,19 +595,23 @@ fm_remote_job_worker_wake_path() { printf '%s\n' "$FM_REMOTE_JOB_STATE/worker.wa
 
 # Best-effort nudge after publishing queue work. The worker holds the FIFO open
 # read-write, so this read-write open never blocks, and a byte written while no
-# worker holds it is discarded on close. A non-empty pending marker means a
-# byte is already waiting and the worker has not yet rescanned, so that wake
-# covers work published before this call and no second byte is written.
-# Anything but a real FIFO and a regular marker is left alone.
+# worker holds it is discarded on close. Only the caller whose noclobber create
+# of the pending marker wins writes a byte; a loser relies on that pending wake,
+# whose rescan starts after this caller published its work. Anything already at
+# the marker path, including a symlink or FIFO, loses the claim untouched.
 fm_remote_job_wake_worker() {
-  local wake pending
+  local wake pending noclobber=0 claimed=1
   [ -n "$FM_REMOTE_JOB_STATE" ] || return 0
   wake="$FM_REMOTE_JOB_STATE/worker.wake"
   pending="$wake.pending"
   [ -p "$wake" ] && [ ! -L "$wake" ] || return 0
-  [ -f "$pending" ] && [ ! -L "$pending" ] || return 0
-  [ ! -s "$pending" ] || return 0
-  { printf 'w' > "$pending"; printf 'w' 1<>"$wake"; } 2>/dev/null || true
+  [ ! -e "$pending" ] && [ ! -L "$pending" ] || return 0
+  case $- in *C*) noclobber=1 ;; esac
+  set -C
+  { : > "$pending"; } 2>/dev/null && claimed=0
+  [ "$noclobber" -eq 1 ] || set +C
+  [ "$claimed" -eq 0 ] || return 0
+  { printf 'w' 1<>"$wake"; } 2>/dev/null || true
   return 0
 }
 
