@@ -60,6 +60,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-secondmate-parent-lib.sh"
 # shellcheck source=bin/fm-secondmate-registry-lib.sh
 . "$SCRIPT_DIR/fm-secondmate-registry-lib.sh"
+# shellcheck source=bin/fm-local-default-branch-lib.sh
+. "$SCRIPT_DIR/fm-local-default-branch-lib.sh"
 
 MODE=
 YOLO=
@@ -195,6 +197,14 @@ if [ -n "$PROMOTE_PROJECT" ]; then
   FORGE=${PROMOTE_STANDING_FORGE:-none}
   refuse_impossible_forge_posture || exit 1
 fi
+# A local-only ship's landing branch is resolved once here, exactly as spawn does.
+LANDING_BRANCH=
+if fm_is_local_only_task "$MODE" && [ -n "$PROMOTE_PROJECT" ]; then
+  LANDING_BRANCH=$(fm_resolve_local_landing_branch "$PROMOTE_PROJECT") || {
+    echo "error: $ID cannot promote: the local-only mirror $PROMOTE_PROJECT has no usable landing branch" >&2
+    exit 1
+  }
+fi
 # An unbound project keeps the exact wording it always had.
 PROMOTE_FORGE_WORDS=
 [ "$FORGE" = none ] || PROMOTE_FORGE_WORDS=" forge=$FORGE"
@@ -313,12 +323,13 @@ fi
 BRIEF_REPLACEMENT=
 
 TMP="$STATE/.$ID.meta.promote.${BASHPID:-$$}"
-grep -v -e '^kind=' -e '^mode=' -e '^yolo=' -e '^branch=' "$META" > "$TMP"
+grep -v -e '^kind=' -e '^mode=' -e '^yolo=' -e '^branch=' -e '^landing_branch=' "$META" > "$TMP"
 {
   echo "kind=ship"
   echo "mode=$MODE"
   echo "yolo=$YOLO"
   echo "branch=$BRANCH"
+  [ -z "$LANDING_BRANCH" ] || echo "landing_branch=$LANDING_BRANCH"
 } >> "$TMP"
 if ! fm_backlog_atomic_transition publish "$TMP" "$META" "task record" "$STATE"; then
   rm -f -- "$TMP"

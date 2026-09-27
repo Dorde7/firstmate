@@ -572,6 +572,47 @@ test_local_merge_refuses_a_mirror_off_its_landing_branch() {
   pass "fm-merge-local: a local-only task refuses to land while the mirror is off its recorded landing branch"
 }
 
+test_promoted_local_only_scout_records_its_landing_branch() {
+  local home proj id meta out landing
+  home="$TMP_ROOT/promote-landing/home"
+  proj="$TMP_ROOT/promote-landing/proj"
+  id=promote-landing-e4
+  meta="$home/state/$id.meta"
+  mkdir -p "$home/state" "$home/data" "$proj"
+  git -C "$proj" init -q -b master || fail "could not initialize promoted mirror fixture"
+  git -C "$proj" config user.email test@example.com
+  git -C "$proj" config user.name test
+  git -C "$proj" commit -q --allow-empty -m base || fail "could not commit promoted mirror fixture base"
+  printf -- '- %s [local-only] - test fixture (added 2026-09-27)\n' "$(basename "$proj")" > "$home/data/projects.md"
+  write_brief "$home" "$id"
+
+  # A primary left on a task branch is refused before the task record changes.
+  git -C "$proj" checkout -qb fm/other-task || fail "could not leave the mirror on a task branch"
+  printf 'window=fm-%s\nkind=scout\nworktree=/tmp/wt\nproject=%s\n' "$id" "$proj" > "$meta"
+  if out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" "$id" --mode local-only --yolo off 2>&1); then
+    fail "promotion recorded a task branch as the landing branch: $out"
+  fi
+  assert_contains "$out" "is on task branch 'fm/other-task'" "promotion did not name the task-branch refusal"
+  assert_grep 'kind=scout' "$meta" "refused local-only promotion still changed the task record"
+  assert_absent "$home/data/$id/ship-instructions.md" "refused local-only promotion still wrote ship instructions"
+
+  # A primary on its landing branch is recorded, and a later scratch checkout cannot redirect the landing.
+  git -C "$proj" checkout -q master || fail "could not restore the mirror landing branch"
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" "$id" --mode local-only --yolo off 2>&1) \
+    || fail "local-only promotion on the landing branch should succeed: $out"
+  assert_grep 'landing_branch=master' "$meta" "promotion did not record the mirror's landing branch"
+  git -C "$proj" checkout -qb "fm/$id" || fail "could not create the promoted task branch"
+  git -C "$proj" commit -q --allow-empty -m change || fail "could not commit the promoted task change"
+  landing=$(git -C "$proj" rev-parse master)
+  git -C "$proj" checkout -qb scratch master || fail "could not leave the mirror on scratch"
+  if out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$MERGE_LOCAL" "$id" 2>&1); then
+    fail "promoted local-only task landed on scratch instead of refusing: $out"
+  fi
+  assert_contains "$out" "this task lands on 'master'" "merge-local did not honor the promoted landing branch"
+  [ "$(git -C "$proj" rev-parse scratch)" = "$landing" ] || fail "merge-local fast-forwarded scratch for a promoted task"
+  pass "fm-promote: a promoted local-only scout records its landing branch and refuses a task-branch primary"
+}
+
 # A registered name may contain spaces, and the lookup must match the whole
 # name rather than only its first whitespace-delimited token (issue #1977).
 # The longer "foo bar" row is listed before the "foo" row so a leading-prefix
@@ -1708,6 +1749,7 @@ test_promotion_branch_command_is_shell_safe
 test_local_merge_uses_the_recorded_ship_branch
 test_local_merge_lands_on_the_mirror_checkout_regardless_of_registry
 test_local_merge_refuses_a_mirror_off_its_landing_branch
+test_promoted_local_only_scout_records_its_landing_branch
 test_project_mode_matches_whole_multiword_names
 test_project_mode_maps_the_conditional_policy
 test_project_mode_binds_the_forge_orthogonally
