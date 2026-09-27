@@ -1920,6 +1920,7 @@ ok - Codex codex-cli 0.157.0: the real app-server is stale without a session lea
 This guard proves the installed server's process shape and its legacy-lock classification.
 The portable regression proves Desktop lease acquisition, renewal through a foreground checkpoint and the Bash hook, foreign-session refusal, expiry, and a new generation on replacement under the same app-server pid.
 It proves a supervision host park that outlives the lease renews it from the park loop, so the host still owns the lock when the close arrives.
+It proves the host also renews the lease while an engine turn runs, and that a branch claim bound to a replaced session's generation is refused.
 It also proves a checkpoint reclaims a free lock after its own lease expired, after the shared app-server restarted, and over a pre-lease daemon lock.
 
 ## Cursor Agent CLI

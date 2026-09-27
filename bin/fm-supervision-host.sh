@@ -114,7 +114,8 @@
 # with a "supervision-host:" line and leaves the decision to its owner; a
 # host that stands down before activation leaves the owner's host record,
 # processes, arms, and leases alone. The engine runs with
-# FM_SUPERVISION_ACTOR=branch, the session-lock holder as FM_LEASE_HOLDER_PID,
+# FM_SUPERVISION_ACTOR=branch, the session-lock holder as FM_LEASE_HOLDER_PID
+# (with its Desktop lock generation as FM_LEASE_HOLDER_GENERATION),
 # the primary's harness pin, and this turn's report id, so every guarded
 # script applies the same partition, leases, and away relocation it applies to
 # the Pi branch. At activation the host stops anything a crashed predecessor
@@ -850,8 +851,10 @@ handle_wake() {  # <reason-lines>
   TURN_RESULT=$result
   TURN_ERRORS=$errors
   ENGINE_RUNNING=1
-  # Backgrounded and waited, so a signal to the host is handled at once
-  # instead of after the whole turn; the cleanup stops the engine.
+  # Backgrounded and polled, so a signal to the host is handled within one
+  # poll instead of after the whole turn; the cleanup stops the engine. The
+  # engine binds its task leases to the Desktop lock generation this host
+  # holds now, so an engine that outlives it never claims for a successor.
   (
     export FM_HOME STATE
     [ -z "${FM_STATE_OVERRIDE:-}" ] || export FM_STATE_OVERRIDE
@@ -859,6 +862,11 @@ handle_wake() {  # <reason-lines>
     export FM_SUPERVISION_ACTOR=branch
     FM_LEASE_HOLDER_PID=$(sed -n '1p' "$STATE/.lock" 2>/dev/null | tr -cd '0-9')
     export FM_LEASE_HOLDER_PID
+    FM_LEASE_HOLDER_GENERATION=
+    if fm_codex_desktop_lease_live "$STATE" "$FM_LEASE_HOLDER_PID"; then
+      FM_LEASE_HOLDER_GENERATION=$FM_CODEX_LEASE_GENERATION
+    fi
+    export FM_LEASE_HOLDER_GENERATION
     export FM_SUPERVISION_PRIMARY_HARNESS="$PRIMARY"
     export FM_BRANCH_REPORT_TURN="$turn"
     fm_supervision_engine_turn "$FM_SUPERVISION_ENGINE" "$FM_SUPERVISION_ENGINE_MODEL" \
@@ -866,6 +874,12 @@ handle_wake() {  # <reason-lines>
       "$result" "$errors" "$ENGINE_PID_FILE"
   ) &
   ENGINE_SUBSHELL=$!
+  # An engine turn also blocks the Desktop thread's hooks, so the host keeps
+  # renewing that thread's lease while the turn runs, exactly as a park does.
+  while fm_pid_alive "$ENGINE_SUBSHELL"; do
+    fm_codex_desktop_lease_touch "$STATE" "$SCRIPT_DIR/fm-lock.sh"
+    sleep "$POLL"
+  done
   wait "$ENGINE_SUBSHELL"
   rc=$?
   ENGINE_SUBSHELL=

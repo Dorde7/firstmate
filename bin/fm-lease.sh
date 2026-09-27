@@ -13,7 +13,8 @@
 #       Take the lease for the calling actor. Idempotent for the holder (the
 #       claim refreshes its own lease). Refuses with exit 6 while the other
 #       actor holds a live lease. A stale lease (dead pid, or a torn record)
-#       is cleared and re-claimed.
+#       is cleared and re-claimed. With FM_LEASE_HOLDER_GENERATION set, the
+#       claim is refused unless that is still the live Desktop lock generation.
 #   fm-lease.sh release <task> [--actor main|branch]
 #       Drop the calling actor's lease. Releasing a lease the actor does not
 #       hold is a silent no-op, so a retry after a partial failure is safe.
@@ -130,6 +131,13 @@ case "$CMD" in
     HOLDER_GENERATION=
     if fm_codex_desktop_lease_live "$STATE" "$HOLDER_PID"; then
       HOLDER_GENERATION=$FM_CODEX_LEASE_GENERATION
+    fi
+    # A caller bound to one Desktop lock generation (the supervision host's
+    # engine) never claims under a later session sharing the same app-server.
+    if [ -n "${FM_LEASE_HOLDER_GENERATION:-}" ] \
+      && [ "$HOLDER_GENERATION" != "$FM_LEASE_HOLDER_GENERATION" ]; then
+      echo "error: claim refused - the session lock generation this $ACTOR actor served has ended (state/.lock-desktop-lease)" >&2
+      exit "$FM_LEASE_REFUSE_EXIT"
     fi
     TMP=$(mktemp "$STATE/.fm-lease-tmp.XXXXXX")
     if [ -n "$HOLDER_GENERATION" ]; then

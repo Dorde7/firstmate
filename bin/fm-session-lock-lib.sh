@@ -92,9 +92,9 @@ fm_codex_desktop_session_id() {
 # while an ended thread frees the lock within half an hour.
 # Renewal gap: while supervising, the longest normal gap is the 180-second
 # checkpoint interval. A supervision host park, including a default one-hour
-# away park, blocks those hooks, so the host renews from its park loop; its
-# longest gap is the 300-second touch interval plus one bounded engine turn
-# (1200 seconds and a 30-second grace by default). An idle thread that is not
+# away park, and each engine turn inside it block those hooks, so the host
+# renews from both its park loop and its engine-turn wait; its longest gap is
+# the 300-second touch interval plus one poll. An idle thread that is not
 # supervising renews nothing, and its lease is meant to expire; the renew
 # fall-through in bin/fm-lock.sh reclaims that free lock at the thread's next
 # checkpoint.

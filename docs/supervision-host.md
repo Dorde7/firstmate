@@ -249,7 +249,8 @@ The latch belongs to one main session, engine, and model, so a new main session 
 When the host loses session-lock ownership or its auto-arm generation, it stands down silently and leaves continuity to whoever owns it now.
 A host that starts without that ownership stands down before activation.
 So it never stops the owner's host or watcher or releases its leases.
-A park blocks a Codex Desktop thread's own hooks, so the host renews that thread's session-lock lease from its park loop; without that, a park longer than the lease, such as a default away park, would lose ownership mid-park.
+A park blocks a Codex Desktop thread's own hooks, so the host renews that thread's session-lock lease from its park loop and while each engine turn runs; without that, a park or engine turn longer than the lease, such as a default away park, would lose ownership mid-park.
+The engine receives the Desktop lock generation the host held at turn start as `FM_LEASE_HOLDER_GENERATION`, and `bin/fm-lease.sh claim` refuses once that generation is no longer the live one, so an engine that outlives its session never binds a task lease to a replacement session under the same app-server.
 
 ### A host that dies without a close
 

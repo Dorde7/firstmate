@@ -477,6 +477,18 @@ SH
   out=$(FM_TEST_APP_PID="$app_pid" PATH="$fakebin:$PATH" FM_HOME="$dir" \
     "$ROOT/bin/fm-lease.sh" check demo)
   [[ "$out" = branch\ *\ stale ]] || fail "the prior Desktop task lease stayed live after replacement: $out"
+  # A branch engine that outlived desktop-a is still bound to its generation,
+  # so its claim must not bind a live lease to desktop-b's generation.
+  if FM_TEST_APP_PID="$app_pid" PATH="$fakebin:$PATH" FM_HOME="$dir" \
+    FM_SUPERVISION_ACTOR=branch FM_LEASE_HOLDER_PID="$app_pid" FM_LEASE_HOLDER_GENERATION="$generation" \
+    "$ROOT/bin/fm-lease.sh" claim demo > "$dir/old-engine.out" 2>&1; then
+    fail "a branch engine from the replaced Desktop session claimed under the new generation"
+  fi
+  grep -q 'generation this branch actor served has ended' "$dir/old-engine.out" \
+    || fail "the old engine's claim was refused for the wrong reason: $(cat "$dir/old-engine.out")"
+  out=$(FM_TEST_APP_PID="$app_pid" PATH="$fakebin:$PATH" FM_HOME="$dir" \
+    "$ROOT/bin/fm-lease.sh" check demo)
+  [[ "$out" = branch\ *\ stale ]] || fail "a refused old-engine claim changed the task lease: $out"
   FM_TEST_APP_PID="$app_pid" PATH="$fakebin:$PATH" FM_HOME="$dir" \
     FM_SUPERVISION_ACTOR=main "$ROOT/bin/fm-lease.sh" claim demo \
     || fail "the replacement Desktop session could not claim the stale task lease"
@@ -670,6 +682,100 @@ SH
   [ "$generation" = generation-a ] || fail "the host park changed the Desktop lease generation"
   [ "$expiry" -gt "$(($(date +%s) + 1500))" ] || fail "the host park did not renew the Desktop lease"
   pass "session-lock e2e: a supervision host park longer than the Desktop lease keeps renewing it"
+}
+
+# An engine turn inside a park blocks the Desktop thread's hooks just as the
+# park does, and a long turn bound can outlive the lease. The stub engine ages
+# the lease past the touch interval at turn start, then waits; the host must
+# renew it before the turn ends. The engine must also see the generation the
+# host held, so its lease claims stay bound to this session.
+test_codex_desktop_host_engine_turn_renews_lease() {
+  local dir fakebin app_pid generation expiry
+  dir="$TMP_ROOT/codex-desktop-host-turn"
+  fakebin=$(fm_fakebin "$dir")
+  mkdir -p "$dir/state" "$dir/config" "$dir/bin"
+  # Only the Desktop shape is faked; process identity fields stay real.
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+case " $* " in *' comm= '*|*' args= '*|*' ppid= '*) ;; *) exec /bin/ps "$@" ;; esac
+field= pid=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field=$2; shift 2 ;;
+    -p) pid=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+if [ "$pid" = "$FM_TEST_APP_PID" ]; then
+  case "$field" in
+    comm=) printf '%s\n' codex ;;
+    args=) printf '%s\n' 'codex app-server --listen unix:// --managed-daemon' ;;
+    ppid=) printf '%s\n' 1 ;;
+  esac
+else
+  case "$field" in
+    comm=) printf '%s\n' bash ;;
+    args=) printf '%s\n' 'bash /repo/bin/fm-supervision-host.sh' ;;
+    ppid=) printf '%s\n' "$FM_TEST_APP_PID" ;;
+  esac
+fi
+SH
+  chmod +x "$fakebin/ps"
+  cp -R "$ROOT/bin/." "$dir/bin/"
+  cat > "$dir/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+[ "${1:-}" != --stop ] || exit 0
+printf 'watcher: started pid=%s\n' "$$"
+[ ! -e "$FM_HOME/armed-once" ] || exec sleep 60
+: > "$FM_HOME/armed-once"
+sleep 1
+printf 'check: fixture wake\n'
+SH
+  chmod +x "$dir/bin/fm-watch-arm.sh"
+  cat > "$dir/engine-stub" <<'SH'
+#!/usr/bin/env bash
+state=$FM_HOME/state
+printf '%s\n' "${FM_LEASE_HOLDER_GENERATION:-}" > "$FM_HOME/engine-generation"
+read -r v pid id gen _ < "$state/.lock-desktop-lease"
+printf '%s %s %s %s %s\n' "$v" "$pid" "$id" "$gen" "$(($(date +%s) + 60))" > "$state/.lock-desktop-lease"
+sleep 4
+read -r _ _ _ _ expiry < "$state/.lock-desktop-lease"
+printf '%s\n' "$expiry" > "$FM_HOME/engine-seen-expiry"
+printf '{"type":"result","subtype":"success","is_error":false,"total_cost_usd":0,"session_id":"stub"}\n'
+SH
+  chmod +x "$dir/engine-stub"
+  printf 'claude\n' > "$dir/config/supervision-host"
+  # Branch eligibility resolves the queued wake to its task record, and the
+  # branch prompt embeds tracked skills beside the copied bin.
+  ln -s "$ROOT/.pi" "$dir/.pi"
+  ln -s "$ROOT/.agents" "$dir/.agents"
+  printf 'project=demo\nwindow=fm-demo\nharness=claude\n' > "$dir/state/demo.meta"
+  printf '%s\t1\tsignal\tdemo\tsignal: demo needs a look\n' "$(date +%s)" > "$dir/state/.wake-queue"
+  : > "$dir/state/.afk-contract"
+  sleep 120 &
+  app_pid=$!
+  BG_FIXTURE_PIDS+=("$app_pid")
+  printf '%s\n' "$app_pid" > "$dir/state/.lock"
+  printf 'v1 %s desktop-a generation-a %s\n' "$app_pid" "$(($(date +%s) + 1800))" \
+    > "$dir/state/.lock-desktop-lease"
+
+  FM_TEST_APP_PID="$app_pid" PATH="$fakebin:$PATH" FM_HOME="$dir" \
+    CODEX_SESSION_ID=desktop-a CODEX_THREAD_ID=desktop-a \
+    FM_SUPERVISION_ENGINE_CLAUDE_BIN="$dir/engine-stub" \
+    FM_SUPERVISION_HOST_PRIMARY=codex FM_SUPERVISION_HOST_PARK_SECONDS=25 \
+    FM_SUPERVISION_HOST_TURN_TIMEOUT=10 FM_SUPERVISION_ENGINE_GRACE=1 \
+    "$dir/bin/fm-supervision-host.sh" park > "$dir/host.out" 2>&1
+  [ -s "$dir/engine-seen-expiry" ] \
+    || fail "the host never ran an engine turn: $(cat "$dir/host.out"; cat "$dir/state/.supervision-host.log" 2>/dev/null)"
+  [ "$(cat "$dir/engine-generation")" = generation-a ] \
+    || fail "the engine did not receive the host's Desktop lock generation: $(cat "$dir/engine-generation")"
+  expiry=$(cat "$dir/engine-seen-expiry")
+  [ "$expiry" -gt "$(($(date +%s) + 1500))" ] \
+    || fail "the host did not renew the Desktop lease during the engine turn"
+  read -r _ _ _ generation _ < "$dir/state/.lock-desktop-lease"
+  [ "$generation" = generation-a ] || fail "the engine-turn renewal changed the Desktop lease generation"
+  pass "session-lock e2e: a supervision host renews the Desktop lease while an engine turn runs"
 }
 
 # A background Claude session's process table. The hook fires inside
@@ -1501,6 +1607,7 @@ test_codex_app_server_is_not_a_session_lock_owner
 test_codex_desktop_lock_lease_acquire_and_reclaim
 test_codex_desktop_renew_reclaims_free_lock
 test_codex_desktop_host_park_renews_lease
+test_codex_desktop_host_engine_turn_renews_lease
 test_same_session_id_owns_a_recycled_background_chain
 test_anchor_pid_is_the_model_loop_process_only_for_a_trusted_id
 test_e2e_version_named_session_claims_the_home
