@@ -88,6 +88,8 @@ export FM_HOME FM_STATE_OVERRIDE="$STATE"
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-timeout-lib.sh
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
+# shellcheck source=bin/fm-path-lib.sh
+. "$SCRIPT_DIR/fm-path-lib.sh"
 
 fail() { printf 'fm-contributions: %s\n' "$*" >&2; exit 1; }
 usage() { sed -n '2,/^set -eu$/s/^# \{0,1\}//p' "$0"; }
@@ -120,16 +122,6 @@ jq_lib() { # jq options/program via final argument
   jq -L "$SCRIPT_DIR" "$@" "include \"fm-contributions\"; $program"
 }
 
-# Loaded on first use, so a snapshot of a home with no records never pays for
-# the wake library's source-time state initialization.
-load_wake_lib() {
-  command -v fm_lock_acquire_wait >/dev/null 2>&1 && return 0
-  FM_WAKE_QUEUE="$STATE/.wake-queue"
-  FM_WAKE_QUEUE_LOCK="$STATE/.wake-queue.lock"
-  # shellcheck source=bin/fm-wake-lib.sh
-  . "$SCRIPT_DIR/fm-wake-lib.sh"
-}
-
 read_saved() {
   local file dir task
   : > "$TMP/saved.jsonl"
@@ -139,7 +131,6 @@ read_saved() {
   fi
   for file in "$DATA"/*/contributions.json; do
     [ -e "$file" ] || [ -L "$file" ] || continue
-    load_wake_lib
     fm_dirname_to dir "$file"
     fm_basename_to task "$dir"
     if [ -L "$file" ] || [ -L "$dir" ] || [ ! -f "$file" ] \
@@ -177,7 +168,11 @@ project() {
 acquire() {
   [ -d "$STATE" ] && [ ! -L "$STATE" ] || fail 'state directory unavailable'
   [ -d "$DATA" ] && [ ! -L "$DATA" ] || fail 'data directory unavailable'
-  load_wake_lib
+  # Keep the wake library's source-time state initialization off read-only paths.
+  FM_WAKE_QUEUE="$STATE/.wake-queue"
+  FM_WAKE_QUEUE_LOCK="$STATE/.wake-queue.lock"
+  # shellcheck source=bin/fm-wake-lib.sh
+  . "$SCRIPT_DIR/fm-wake-lib.sh"
   fm_lock_acquire_wait "$STATE/.contributions.lock" || fail 'observation lock unavailable'
   LOCK_HELD=1
 }

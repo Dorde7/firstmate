@@ -22,24 +22,16 @@
 # its recorded command group, leaving interrupted records for the replacement
 # worker's orphan recovery.
 #
-# The serving loop does not busy-poll an idle queue. After any activity - a
-# wake nudge, a lane started, or a lane reaped - it rescans every
-# FM_REMOTE_JOB_POLL_SECONDS for 20 passes, then blocks on its worker.wake FIFO
-# for up to one second without forking. The library's nudge on staging,
-# cancellation, and lane exit ends that wait at once, and a burst of nudges
-# coalesces into the one wake byte a nudge may have pending, so it restarts
-# that short window once rather than once per nudge; the bound alone still
-# finds a lane that died without nudging, an orphaned claim, and an expired
-# queue deadline. A marker claimed by a nudge that died before writing its
-# byte suppresses nudges, never rescans, and is released once it has stood
-# through idle waits with no byte for 30 seconds; a nudge paused longer than
-# that, or across a worker restart, can at worst add one harmless extra wake.
-# Without a usable FIFO the loop sleeps that same second between idle passes
-# instead. Either way the readiness heartbeat is refreshed about once per
-# second, far inside the probe's 10-second freshness bound. The
-# stale sweep, whose state preparation also re-applies the queue directories'
-# 0700 modes, runs at startup and then at most every 60 seconds, never more
-# rarely than the shortest record reap age.
+# The serving loop does not busy-poll an idle queue. After a lane starts or is
+# reaped it rescans every FM_REMOTE_JOB_POLL_SECONDS for 20 passes, so a home
+# whose lane just finished starts its next job promptly; otherwise it sleeps
+# one second between passes. That bound is how long newly staged or cancelled
+# work, a lane that died, an orphaned claim, or an expired queue deadline can
+# wait for the next pass, and it refreshes the readiness heartbeat about once
+# per second, far inside the probe's 10-second freshness bound. The stale
+# sweep, whose state preparation also re-applies the queue directories' 0700
+# modes, runs at startup and then at most every 60 seconds, never more rarely
+# than the shortest record reap age.
 #
 # The worker is abandoned when its configured FM_ROOT stops being a genuine
 # Firstmate checkout - the state a pruned no-mistakes gate worktree, a returned
@@ -70,10 +62,8 @@ FM_REMOTE_JOB_SUPERVISOR_MAX_RESTARTS=$(worker_bounded_setting "${FM_REMOTE_JOB_
 FM_REMOTE_JOB_SUPERVISOR_MAX_BACKOFF_SECONDS=$(worker_bounded_setting "${FM_REMOTE_JOB_SUPERVISOR_MAX_BACKOFF_SECONDS:-}" 5)
 FM_REMOTE_JOB_SUPERVISOR_HEALTHY_SECONDS=$(worker_bounded_setting "${FM_REMOTE_JOB_SUPERVISOR_HEALTHY_SECONDS:-}" 10)
 WORKER_FAST_PASSES=20
-# bash 3.2 read -t takes whole seconds; one keeps the heartbeat fresh.
 WORKER_IDLE_WAIT_SECONDS=1
 WORKER_SWEEP_SECONDS=60
-WORKER_WAKE_RELEASE_SECONDS=30
 
 SCRIPT_DIR=$(CDPATH='' cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
 FM_ROOT=${FM_ROOT_OVERRIDE:-$(CDPATH='' cd "$SCRIPT_DIR/.." && pwd -P)}
@@ -93,9 +83,6 @@ WORKER_LANE_HOMES=()
 WORKER_LANE_PIDS=()
 WORKER_LANE_STARTS=()
 WORKER_LANE_JOBS=()
-WORKER_WAKE_OPEN=0
-WORKER_WAKE_PENDING=
-WORKER_WAKE_CLAIMED_SINCE=
 WORKER_ACTIVITY=0
 
 worker_error() { printf 'remote-job-worker: %s\n' "$1" >&2; }
@@ -1037,7 +1024,7 @@ worker_lane_execute() { # <account-home> <job-dir>
 # has always run in.
 worker_start_lane() { # <job-dir> <home>
   local job=$1 home=$2 lane_pid lane_start
-  "$SCRIPT_DIR/fm-remote-job-worker.sh" --lane "${job##*/}" 8<&- &
+  "$SCRIPT_DIR/fm-remote-job-worker.sh" --lane "${job##*/}" &
   lane_pid=$!
   WORKER_ACTIVITY=1
   lane_start=$(fm_remote_job_process_start "$lane_pid" 2>/dev/null || true)
@@ -1053,9 +1040,8 @@ worker_lane_main() { # <job-id>
   account_home=$(worker_account_home) || { worker_error "cannot resolve account home"; exit 1; }
   FM_ROOT=$(fm_remote_job_canonical_existing_dir "$FM_ROOT") || { worker_error "configured FM_ROOT is unsafe"; exit 1; }
   fm_remote_job_prepare_state "$account_home" || { worker_error "$FM_REMOTE_JOB_ERROR"; exit 1; }
-  job=$(fm_remote_job_job_dir "$1" 2>/dev/null) || { fm_remote_job_wake_worker; exit 0; }
+  job=$(fm_remote_job_job_dir "$1" 2>/dev/null) || exit 0
   worker_lane_execute "$account_home" "$job"
-  fm_remote_job_wake_worker
 }
 
 worker_process_once() { # <account-home>
@@ -1130,48 +1116,10 @@ worker_process_once() { # <account-home>
   done < <(printf '%s' "$candidates" | sort -t $'\t' -k1,1n -k2,2)
 }
 
-# Open this worker's wake FIFO read-write on fd 8, replacing anything else at
-# its path. Holding both ends means the idle read never sees end-of-file and a
-# nudge written while this worker is busy waits in the pipe. A stale pending
-# marker is removed only once the FIFO is held, so a claim whose byte went to no
-# holder cannot outlive it and silence every later nudge. Without the FIFO the
-# loop falls back to sleeping out the idle bound.
-worker_open_wake() {
-  local wake pending
-  wake=$(fm_remote_job_worker_wake_path)
-  pending="$wake.pending"
-  if [ -L "$wake" ] || { [ -e "$wake" ] && [ ! -p "$wake" ]; }; then
-    rm -f -- "$wake" 2>/dev/null || return 1
-  fi
-  if [ ! -p "$wake" ]; then
-    (umask 077; mkfifo "$wake") 2>/dev/null || return 1
-  fi
-  [ -p "$wake" ] && [ ! -L "$wake" ] || return 1
-  exec 8<> "$wake" || return 1
-  WORKER_WAKE_PENDING=$pending
-  worker_clear_wake || { exec 8<&-; return 1; }
-  WORKER_WAKE_OPEN=1
-}
-
-# Remove the pending marker so the next nudge can claim it. After a consumed
-# wake byte this runs before the rescan, so a nudge that lost the claim relies
-# on a pass that has not yet looked.
-worker_clear_wake() {
-  WORKER_WAKE_CLAIMED_SINCE=
-  [ -e "$WORKER_WAKE_PENDING" ] || [ -L "$WORKER_WAKE_PENDING" ] || return 0
-  rm -f -- "$WORKER_WAKE_PENDING" 2>/dev/null
-}
-
-# Wait for the next pass: poll quickly for a short window after activity so a
-# lane that nudged just before exiting is reaped and its home's next job
-# starts, otherwise block on the wake FIFO up to the idle bound, or sleep it
-# out when there is no FIFO. A read that returns early without a byte and
-# without a second elapsing cannot be the timeout, so the descriptor is
-# unusable and the loop falls back to sleeping rather than spinning. A marker
-# that stays claimed through idle timeouts with no byte for the release bound
-# belongs to a nudge that died between claiming and writing, so it is released.
+# Wait for the next pass: poll quickly for a short window after a lane starts
+# or is reaped, so a finished lane's home starts its next job promptly,
+# otherwise sleep out the idle bound.
 worker_wait_for_work() {
-  local started byte
   if [ "$WORKER_ACTIVITY" -eq 1 ]; then
     WORKER_FAST_REMAINING=$WORKER_FAST_PASSES
     WORKER_ACTIVITY=0
@@ -1181,30 +1129,7 @@ worker_wait_for_work() {
     sleep "$FM_REMOTE_JOB_POLL_SECONDS"
     return 0
   fi
-  if [ "$WORKER_WAKE_OPEN" -ne 1 ]; then
-    sleep "$WORKER_IDLE_WAIT_SECONDS"
-    return 0
-  fi
-  started=$SECONDS
-  if IFS= read -r -t "$WORKER_IDLE_WAIT_SECONDS" -n 1 byte <&8; then
-    : "$byte"
-    worker_clear_wake || true
-    WORKER_ACTIVITY=1
-    return 0
-  fi
-  if [ "$SECONDS" -eq "$started" ]; then
-    exec 8<&- 2>/dev/null || true
-    WORKER_WAKE_OPEN=0
-    return 0
-  fi
-  if [ ! -e "$WORKER_WAKE_PENDING" ] && [ ! -L "$WORKER_WAKE_PENDING" ]; then
-    WORKER_WAKE_CLAIMED_SINCE=
-  elif [ -z "$WORKER_WAKE_CLAIMED_SINCE" ]; then
-    WORKER_WAKE_CLAIMED_SINCE=$SECONDS
-  elif [ $((SECONDS - WORKER_WAKE_CLAIMED_SINCE)) -ge "$WORKER_WAKE_RELEASE_SECONDS" ]; then
-    worker_clear_wake || true
-  fi
-  return 0
+  sleep "$WORKER_IDLE_WAIT_SECONDS"
 }
 
 main() {
@@ -1226,7 +1151,6 @@ main() {
   trap worker_shutdown HUP INT TERM
   worker_publish_identity "$account_home" || { worker_error "cannot publish worker code identity"; exit 1; }
   worker_publish_pid || { worker_error "cannot publish worker pid"; exit 1; }
-  worker_open_wake || worker_error "cannot open the worker wake FIFO; sleeping between idle passes instead"
   sweep_interval=$WORKER_SWEEP_SECONDS
   [ "$FM_REMOTE_JOB_STAGE_REAP_SECONDS" -ge "$sweep_interval" ] || sweep_interval=$FM_REMOTE_JOB_STAGE_REAP_SECONDS
   [ "$FM_REMOTE_JOB_REAP_SECONDS" -ge "$sweep_interval" ] || sweep_interval=$FM_REMOTE_JOB_REAP_SECONDS

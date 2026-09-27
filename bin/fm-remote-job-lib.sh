@@ -55,16 +55,6 @@
 # Abandoned .stage.* staging litter older than
 # FM_REMOTE_JOB_STAGE_REAP_SECONDS is reaped by the worker's stale sweep.
 #
-# Staging, cancellation, and a lane finishing its job each nudge the serving
-# worker through its worker.wake FIFO, so an idle worker can block without
-# forking and still claim new work as soon as it is published. A nudge writes
-# its byte only after exclusively creating the worker.wake.pending marker, and
-# the worker removes that marker after consuming a byte and before rescanning,
-# so a burst - concurrent or not - coalesces into one pending byte and the pipe
-# can never fill; a claim the worker releases as abandoned adds at most one
-# more. A missing or foreign wake FIFO or marker only delays pickup to the
-# worker's idle bound; the nudge never blocks or fails its caller.
-#
 # The worker accepts only a tracked, non-symlink executable named fm-*.sh below
 # its configured FM_ROOT/bin. Every child receives env -i with the composed
 # PATH, HOME, FM_HOME, FM_ROOT_OVERRIDE, and FM_REMOTE_JOB_ACTIVE=1. The PATH
@@ -592,30 +582,6 @@ fm_remote_job_next_seq() { # [stage-dir destination]
   done
 }
 
-fm_remote_job_worker_wake_path() { printf '%s\n' "$FM_REMOTE_JOB_STATE/worker.wake"; }
-
-# Best-effort nudge after publishing queue work. The worker holds the FIFO open
-# read-write, so this read-write open never blocks, and a byte written while no
-# worker holds it is discarded on close. Only the caller whose noclobber create
-# of the pending marker wins writes a byte; a loser relies on that pending wake,
-# whose rescan starts after this caller published its work. Anything already at
-# the marker path, including a symlink or FIFO, loses the claim untouched.
-fm_remote_job_wake_worker() {
-  local wake pending noclobber=0 claimed=1
-  [ -n "$FM_REMOTE_JOB_STATE" ] || return 0
-  wake="$FM_REMOTE_JOB_STATE/worker.wake"
-  pending="$wake.pending"
-  [ -p "$wake" ] && [ ! -L "$wake" ] || return 0
-  [ ! -e "$pending" ] && [ ! -L "$pending" ] || return 0
-  case $- in *C*) noclobber=1 ;; esac
-  set -C
-  { : > "$pending"; } 2>/dev/null && claimed=0
-  [ "$noclobber" -eq 1 ] || set +C
-  [ "$claimed" -eq 0 ] || return 0
-  { printf 'w' 1<>"$wake"; } 2>/dev/null || true
-  return 0
-}
-
 fm_remote_job_cancelled() { # <job-dir>
   [ -f "$1/cancel" ] && [ ! -L "$1/cancel" ]
 }
@@ -638,7 +604,6 @@ fm_remote_job_cancel() { # <account-home> <id>
   printf 'cancelled: caller disconnected or abandoned the job\n' > "$tmp" || { rm -f -- "$tmp"; return 1; }
   chmod 600 "$tmp" || { rm -f -- "$tmp"; return 1; }
   mv -f -- "$tmp" "$job/cancel" || return 1
-  fm_remote_job_wake_worker
   state=$(fm_remote_job_read_state "$job" 2>/dev/null || true)
   if [ "$state" = 'done' ]; then
     fm_remote_job_reap "$account_home" "$id" 2>/dev/null || true
@@ -705,7 +670,6 @@ fm_remote_job_stage() { # <account-home> <root> <home> <command> [args...]; stdi
     FM_REMOTE_JOB_ERROR="cannot allocate and publish a remote job staging sequence"
     return 1
   fi
-  fm_remote_job_wake_worker
   # shellcheck disable=SC2034 # Sourceable API consumed by callers that do not use command substitution.
   FM_REMOTE_JOB_ID=$id
   printf '%s\n' "$id"

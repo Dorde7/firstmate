@@ -9,6 +9,8 @@ STATE="${FM_STATE_OVERRIDE:-${STATE:-$FM_HOME/state}}"
 FM_WAKE_QUEUE="${FM_WAKE_QUEUE:-$STATE/.wake-queue}"
 FM_WAKE_QUEUE_LOCK="${FM_WAKE_QUEUE_LOCK:-$STATE/.wake-queue.lock}"
 FM_LOCK_STALE_AFTER="${FM_LOCK_STALE_AFTER:-2}"
+# shellcheck source=bin/fm-path-lib.sh
+. "$FM_WAKE_LIB_DIR/fm-path-lib.sh"
 # Resolved once at source time: fm_pid_identity and fm_path_mtime run inside 0.2s
 # confirm and 0.5s attach polls, and forking uname per call is a measurable cost on
 # the platform (Git Bash/MSYS) that already pays the highest fork price.
@@ -45,42 +47,8 @@ fm_current_pid() {  # [output-variable]
   fi
 }
 
-# Fork-free stand-ins for helpers the watcher, drain, and lock paths run every
-# cycle. Each assigns <output-variable> exactly what `$(dirname -- <path>)`,
-# `$(basename -- <path>)`, or `$(date +%s)` would: POSIX component rules, and
-# the command substitution's removal of trailing newlines.
-fm_dirname_to() {  # <output-variable> <path>
-  local fm_path=$2
-  case "$fm_path" in
-    '') fm_path=. ;;
-    *[!/]*)
-      fm_path=${fm_path%"${fm_path##*[!/]}"}
-      case "$fm_path" in
-        */*)
-          fm_path=${fm_path%/*}
-          fm_path=${fm_path%"${fm_path##*[!/]}"}
-          [ -n "$fm_path" ] || fm_path=/
-          ;;
-        *) fm_path=. ;;
-      esac
-      ;;
-    *) fm_path=/ ;;
-  esac
-  while [ "${fm_path%$'\n'}" != "$fm_path" ]; do fm_path=${fm_path%$'\n'}; done
-  printf -v "$1" '%s' "$fm_path"
-}
-
-fm_basename_to() {  # <output-variable> <path>
-  local fm_path=$2
-  case "$fm_path" in
-    '') ;;
-    *[!/]*) fm_path=${fm_path%"${fm_path##*[!/]}"}; fm_path=${fm_path##*/} ;;
-    *) fm_path=/ ;;
-  esac
-  while [ "${fm_path%$'\n'}" != "$fm_path" ]; do fm_path=${fm_path%$'\n'}; done
-  printf -v "$1" '%s' "$fm_path"
-}
-
+# Fork-free stand-in for `$(date +%s)` on the watcher, drain, and lock paths
+# that read the clock every cycle.
 # printf's %(...)T is a bash 4.2 builtin; stock macOS Bash 3.2 still forks date.
 if [ "${BASH_VERSINFO[0]}" -gt 4 ] || { [ "${BASH_VERSINFO[0]}" -eq 4 ] && [ "${BASH_VERSINFO[1]}" -ge 2 ]; }; then
   fm_epoch_seconds_to() { printf -v "$1" '%(%s)T' -1; }

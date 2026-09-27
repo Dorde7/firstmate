@@ -767,10 +767,10 @@ assert_present "$LOST_STATE/worker.ready" "the ownership-loss worker did not bec
 assert_present "$LOST_STATE/worker.lock" "the ownership-loss worker did not publish its lock"
 kill -STOP "$LOST_TERM_PID"
 for _ in $(seq 1 100); do
-  [ "$(ps -o state= -p "$LOST_TERM_PID" 2>/dev/null | tr -d ' ')" = T ] && break
+  [ "$(ps -o state= -p "$LOST_TERM_PID" 2>/dev/null | cut -c1)" = T ] && break
   sleep 0.05
 done
-[ "$(ps -o state= -p "$LOST_TERM_PID" 2>/dev/null | tr -d ' ')" = T ] \
+[ "$(ps -o state= -p "$LOST_TERM_PID" 2>/dev/null | cut -c1)" = T ] \
   || fail "the ownership-loss worker did not stop"
 rm -rf -- "$LOST_STATE/worker.lock"
 kill -CONT "$LOST_TERM_PID"
@@ -825,7 +825,7 @@ done
 assert_present "$HOLD_STARTED" "the held command did not start before ownership loss"
 kill -STOP "$LOST_TERM_PID"
 for _ in $(seq 1 100); do
-  [ "$(ps -o state= -p "$LOST_TERM_PID" 2>/dev/null | tr -d ' ')" = T ] && break
+  [ "$(ps -o state= -p "$LOST_TERM_PID" 2>/dev/null | cut -c1)" = T ] && break
   sleep 0.05
 done
 rm -rf -- "$LOST_STATE/worker.lock"
@@ -861,7 +861,7 @@ done
 assert_present "$OWNER_STATE/worker.ready" "the worker that will lose ownership did not become ready"
 kill -STOP "$LOST_TERM_PID"
 for _ in $(seq 1 100); do
-  [ "$(ps -o state= -p "$LOST_TERM_PID" 2>/dev/null | tr -d ' ')" = T ] && break
+  [ "$(ps -o state= -p "$LOST_TERM_PID" 2>/dev/null | cut -c1)" = T ] && break
   sleep 0.05
 done
 rm -rf -- "$OWNER_STATE/worker.lock"
@@ -1004,11 +1004,11 @@ STALL_QUARANTINE_INODE=$(file_inode "$STALL_STATE/worker.lock/quarantine")
 # worker has finished.
 kill -STOP "$STALL_REPLACEMENT_PID"
 STALL_DEADLINE=$((SECONDS + 30))
-until [ "$(ps -o state= -p "$STALL_REPLACEMENT_PID" 2>/dev/null | tr -d ' ')" = T ] \
+until [ "$(ps -o state= -p "$STALL_REPLACEMENT_PID" 2>/dev/null | cut -c1)" = T ] \
   || [ "$SECONDS" -ge "$STALL_DEADLINE" ]; do
   sleep 0.05
 done
-[ "$(ps -o state= -p "$STALL_REPLACEMENT_PID" 2>/dev/null | tr -d ' ')" = T ] \
+[ "$(ps -o state= -p "$STALL_REPLACEMENT_PID" 2>/dev/null | cut -c1)" = T ] \
   || fail "the replacement could not be held while the ousted worker resumed"
 kill -KILL -- "-$STALL_JOB_GROUP" 2>/dev/null || true
 STALL_DEADLINE=$((SECONDS + 30))
@@ -1019,11 +1019,11 @@ done
   || fail "the job's command group was still alive after the test stopped it"
 rm -f -- "$STALL_HOLD"
 STALL_DEADLINE=$((SECONDS + 30))
-until [ "$(ps -o state= -p "$STALL_WORKER_PID" 2>/dev/null | tr -d ' ')" = Z ] \
+until [ "$(ps -o state= -p "$STALL_WORKER_PID" 2>/dev/null | cut -c1)" = Z ] \
   || ! kill -0 "$STALL_WORKER_PID" 2>/dev/null || [ "$SECONDS" -ge "$STALL_DEADLINE" ]; do
   sleep 0.05
 done
-[ "$(ps -o state= -p "$STALL_WORKER_PID" 2>/dev/null | tr -d ' ')" = Z ] \
+[ "$(ps -o state= -p "$STALL_WORKER_PID" 2>/dev/null | cut -c1)" = Z ] \
   || ! kill -0 "$STALL_WORKER_PID" 2>/dev/null \
   || fail "the ousted worker did not exit after shutdown resumed"
 STALL_WORKER_RC=0
@@ -1041,11 +1041,11 @@ kill -0 "$STALL_REPLACEMENT_PID" 2>/dev/null \
   || fail "the ousted worker wrote or cleared the replacement quarantine during shutdown"
 kill -TERM "$STALL_REPLACEMENT_PID"
 STALL_DEADLINE=$((SECONDS + 30))
-until [ "$(ps -o state= -p "$STALL_REPLACEMENT_PID" 2>/dev/null | tr -d ' ')" = Z ] \
+until [ "$(ps -o state= -p "$STALL_REPLACEMENT_PID" 2>/dev/null | cut -c1)" = Z ] \
   || ! kill -0 "$STALL_REPLACEMENT_PID" 2>/dev/null || [ "$SECONDS" -ge "$STALL_DEADLINE" ]; do
   sleep 0.05
 done
-[ "$(ps -o state= -p "$STALL_REPLACEMENT_PID" 2>/dev/null | tr -d ' ')" = Z ] \
+[ "$(ps -o state= -p "$STALL_REPLACEMENT_PID" 2>/dev/null | cut -c1)" = Z ] \
   || ! kill -0 "$STALL_REPLACEMENT_PID" 2>/dev/null \
   || fail "the replacement did not finish its own TERM shutdown"
 wait "$STALL_REPLACEMENT_PID" 2>/dev/null || true
@@ -1053,17 +1053,18 @@ STALL_REPLACEMENT_PID=
 STALL_JOB_GROUP=
 pass "an ousted worker in shutdown leaves the replacement quarantine untouched"
 
-# An idle worker must not busy-poll its queue: between passes it blocks on its
-# wake FIFO, so its only steady cost is the once-a-second heartbeat plus the
-# periodic sweep, which the 2-second stage reap age pulls in to every 2 seconds. Every external command the worker runs by name goes through
-# a counting shim, which makes the exec rate observable without privileges.
+# An idle worker must not busy-poll its queue: between passes it sleeps one
+# second, so its only steady cost is that sleep and the once-a-second heartbeat
+# plus the periodic sweep, which the 2-second stage reap age pulls in to every
+# 2 seconds. Every external command the worker runs by name goes through a
+# counting shim, which makes the exec rate observable without privileges.
 QUIET_HOME="$TMP_ROOT/quiet-account"
 QUIET_STATE="$TMP_ROOT/quiet-state"
 QUIET_SHIM="$TMP_ROOT/quiet-shim"
 QUIET_EXEC_LOG="$TMP_ROOT/quiet-execs"
 QUIET_TOUCHED="$TMP_ROOT/quiet-touched"
 mkdir -p "$QUIET_HOME" "$QUIET_SHIM"
-for QUIET_TOOL in sleep chmod mktemp mv rm date stat uname dirname basename wc tr tail head ps sort cat mkdir rmdir mkfifo; do
+for QUIET_TOOL in sleep chmod mktemp mv rm date stat uname dirname basename wc tr tail head ps sort cat mkdir rmdir; do
   QUIET_REAL=$(PATH=/usr/bin:/bin command -v "$QUIET_TOOL") || continue
   cat > "$QUIET_SHIM/$QUIET_TOOL" <<SH
 #!/bin/sh
@@ -1132,7 +1133,7 @@ quiet_stage_completes() { # <state> <account-home> <touched> <label>
   ) || fail "a job staged to the $4 worker did not complete"
   elapsed=$((SECONDS - began))
   assert_present "$3" "the job staged to the $4 worker did not run"
-  [ "$elapsed" -lt 15 ] \
+  [ "$elapsed" -le 5 ] \
     || fail "a job staged to the $4 worker waited ${elapsed}s"
 }
 quiet_stop() { # <pid>
@@ -1145,123 +1146,17 @@ quiet_stop() { # <pid>
   wait "$1" 2>/dev/null || true
 }
 quiet_wait_ready "$QUIET_STATE" idle-rate
-quiet_settle 0
-quiet_measure "an idle worker" 0
-pass "an idle worker blocks between passes instead of busy-polling"
+quiet_settle 3
+quiet_measure "an idle worker" 6
+pass "an idle worker sleeps out a second between passes instead of busy-polling"
 
 quiet_heartbeat_stays_fresh "$QUIET_STATE" "$QUIET_HOME" idle
-pass "an idle worker keeps its readiness heartbeat fresh while blocked"
+pass "an idle worker keeps its readiness heartbeat fresh between passes"
 
-# Publishers never block on a worker that is not reading: with the worker
-# stopped, concurrent bursts of nudges well past the FIFO's pipe capacity and a
-# staging all return promptly and leave at most one wake byte buffered. Resumed,
-# the worker claims the staged job, and the burst coalesced into one wake, so
-# it settles back to its quiet idle wait instead of one fast-poll window per
-# nudge.
-quiet_stopped_burst() { # <state> <account-home> <touched> <label>
-  local burst_pid deadline began elapsed buffered
-  kill -STOP "$QUIET_WORKER_PID"
-  (
-    FM_REMOTE_JOB_STATE="$1"
-    for _ in $(seq 1 20); do
-      ( for _ in $(seq 1 500); do fm_remote_job_wake_worker; done ) &
-    done
-    wait
-    FM_REMOTE_JOB_STATE_ROOT="$1"
-    FM_REMOTE_JOB_QUEUE_TIMEOUT=60
-    FM_REMOTE_JOB_TIMEOUT=30
-    fm_remote_job_stage "$2" "$REMOTE_ROOT" "$REMOTE_HOME" fm-touch-job.sh "$3" \
-      < /dev/null > /dev/null || exit 1
-    printf '%s\n' "$FM_REMOTE_JOB_ID" > "$TMP_ROOT/quiet-burst.id"
-  ) &
-  burst_pid=$!
-  deadline=$((SECONDS + 20))
-  while kill -0 "$burst_pid" 2>/dev/null && [ "$SECONDS" -lt "$deadline" ]; do sleep 0.1; done
-  if kill -0 "$burst_pid" 2>/dev/null; then
-    kill -KILL "$burst_pid" 2>/dev/null || true
-    kill -CONT "$QUIET_WORKER_PID"
-    fail "nudges and staging blocked on the stopped $4 worker"
-  fi
-  wait "$burst_pid" || { kill -CONT "$QUIET_WORKER_PID"; fail "staging to the stopped $4 worker failed"; }
-  buffered=$(
-    exec 9<> "$1/worker.wake"
-    count=0
-    while IFS= read -r -t 1 -n 1 _ <&9; do count=$((count + 1)); done
-    [ "$count" -eq 0 ] || printf 'w' >&9
-    printf '%s\n' "$count"
-  )
-  [ "$buffered" -le 1 ] || { kill -CONT "$QUIET_WORKER_PID"; fail "the burst left $buffered wake bytes buffered for the stopped $4 worker"; }
-  kill -CONT "$QUIET_WORKER_PID"
-  began=$SECONDS
-  (
-    FM_REMOTE_JOB_STATE_ROOT="$1"
-    FM_REMOTE_JOB_TIMEOUT=30
-    FM_REMOTE_JOB_ID=$(cat "$TMP_ROOT/quiet-burst.id")
-    fm_remote_job_wait "$2" "$FM_REMOTE_JOB_ID" || exit 1
-    [ "$FM_REMOTE_JOB_EXIT" -eq 0 ] || exit 1
-    fm_remote_job_reap "$2" "$FM_REMOTE_JOB_ID"
-  ) || fail "the job staged to the stopped $4 worker did not complete once resumed"
-  elapsed=$((SECONDS - began))
-  assert_present "$3" "the job staged to the stopped $4 worker did not run"
-  [ "$elapsed" -lt 15 ] \
-    || fail "the job staged to the stopped $4 worker waited ${elapsed}s once resumed"
-  deadline=$((SECONDS + 10))
-  while :; do
-    : > "$QUIET_EXEC_LOG"
-    sleep 1.5
-    [ "$(grep -cx sleep "$QUIET_EXEC_LOG" || true)" -gt 0 ] || break
-    [ "$SECONDS" -lt "$deadline" ] \
-      || fail "the $4 worker kept fast-polling 10s after a burst of nudges"
-  done
-  : > "$QUIET_EXEC_LOG"
-}
-quiet_stopped_burst "$QUIET_STATE" "$QUIET_HOME" "$TMP_ROOT/quiet-burst-touched" idle
-quiet_measure "a worker after a nudge burst" 0
-pass "publishers never block on a stopped worker, and their burst coalesces into one wake"
-
-# Staging nudges the blocked worker, so new work is claimed and published
-# promptly.
+# The one-second idle bound is the pickup latency: a job staged to an idle
+# worker is claimed on its next pass and completes within a few seconds.
 quiet_stage_completes "$QUIET_STATE" "$QUIET_HOME" "$QUIET_TOUCHED" idle
-pass "staging wakes an idle worker to claim and publish the job promptly"
-
-# A nudge that died between claiming the pending marker and writing its byte
-# leaves the marker with nothing to consume it. Once the finished lane's exit
-# nudge has settled, the test claims the marker itself and never writes, as
-# such a nudge would. The worker keeps that claim - a nudge still mid-write
-# must not lose it - for its 30-second release bound, then releases it so the
-# next nudge wakes the worker at once again.
-quiet_abandoned_claim_released() { # <state> <label>
-  local pending="$1/worker.wake.pending" planted='' released
-  sleep 3
-  for _ in $(seq 1 100); do
-    if ( set -C; : > "$pending" ) 2>/dev/null; then planted=$SECONDS; break; fi
-    sleep 0.1
-  done
-  [ -n "$planted" ] || fail "the $2 worker never released the pending marker to claim"
-  sleep 5
-  ( FM_REMOTE_JOB_STATE="$1"; fm_remote_job_wake_worker )
-  assert_present "$pending" "the $2 worker released a pending claim well inside its bound"
-  while [ -e "$pending" ] && [ $((SECONDS - planted)) -lt 60 ]; do sleep 0.5; done
-  [ ! -e "$pending" ] || fail "the $2 worker never released an abandoned pending claim"
-  released=$((SECONDS - planted))
-  [ "$released" -ge 25 ] \
-    || fail "the $2 worker released a pending claim after only ${released}s"
-  : > "$QUIET_EXEC_LOG"
-  ( FM_REMOTE_JOB_STATE="$1"; fm_remote_job_wake_worker )
-  for _ in $(seq 1 30); do
-    [ "$(grep -cx sleep "$QUIET_EXEC_LOG" || true)" -eq 0 ] || break
-    sleep 0.1
-  done
-  [ "$(grep -cx sleep "$QUIET_EXEC_LOG" || true)" -gt 0 ] \
-    || fail "a nudge after the release did not wake the $2 worker"
-  for _ in $(seq 1 50); do
-    [ -e "$pending" ] || break
-    sleep 0.1
-  done
-  [ ! -e "$pending" ] || fail "the woken $2 worker left the pending marker claimed"
-}
-quiet_abandoned_claim_released "$QUIET_STATE" idle
-pass "an abandoned pending claim is kept inside its bound and then released"
+pass "an idle worker claims and publishes a staged job within a few seconds"
 
 # Hoisting setup out of every pass must not drop the worker's own repair of the
 # queue directories' 0700 modes: the periodic sweep still re-applies them with
@@ -1279,32 +1174,6 @@ done
 quiet_stop "$QUIET_WORKER_PID"
 QUIET_WORKER_PID=
 pass "an idle worker still repairs queue permissions and stops promptly on TERM"
-
-# A worker that cannot open its wake FIFO - here a directory squats on the
-# path - sleeps out the idle bound between passes instead of falling back to
-# the 50 ms poll, while staying ready and still claiming new work.
-QUIET_NOFIFO_HOME="$TMP_ROOT/quiet-nofifo-account"
-QUIET_NOFIFO_STATE="$TMP_ROOT/quiet-nofifo-state"
-mkdir -p "$QUIET_NOFIFO_HOME"
-mkdir -m 700 "$QUIET_NOFIFO_STATE"
-mkdir "$QUIET_NOFIFO_STATE/worker.wake"
-touch "$QUIET_NOFIFO_STATE/worker.wake/keep"
-HOME="$QUIET_NOFIFO_HOME" PATH="$QUIET_SHIM:/usr/bin:/bin:/usr/sbin:/sbin" FM_TEST_EXEC_LOG="$QUIET_EXEC_LOG" \
-  FM_ROOT_OVERRIDE="$REMOTE_ROOT" FM_REMOTE_JOB_STATE_ROOT="$QUIET_NOFIFO_STATE" \
-  FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux \
-  "$REMOTE_ROOT/bin/fm-remote-job-worker.sh" --serve > "$TMP_ROOT/quiet-nofifo.out" 2> "$TMP_ROOT/quiet-nofifo.err" &
-QUIET_WORKER_PID=$!
-quiet_wait_ready "$QUIET_NOFIFO_STATE" FIFO-less
-grep -q 'cannot open the worker wake FIFO' "$TMP_ROOT/quiet-nofifo.err" \
-  || fail "the FIFO-less worker did not report its missing wake FIFO"
-quiet_settle 3
-quiet_measure "a FIFO-less idle worker" 6
-pass "a worker without its wake FIFO sleeps out the idle bound instead of busy-polling"
-quiet_heartbeat_stays_fresh "$QUIET_NOFIFO_STATE" "$QUIET_NOFIFO_HOME" FIFO-less
-quiet_stage_completes "$QUIET_NOFIFO_STATE" "$QUIET_NOFIFO_HOME" "$TMP_ROOT/quiet-nofifo-touched" FIFO-less
-quiet_stop "$QUIET_WORKER_PID"
-QUIET_WORKER_PID=
-pass "a worker without its wake FIFO stays ready and still claims staged work"
 
 # A child that stays up for FM_REMOTE_JOB_SUPERVISOR_HEALTHY_SECONDS clears the
 # consecutive-failure backoff, so a child that dies just past that threshold
