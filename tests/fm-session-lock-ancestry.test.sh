@@ -646,7 +646,7 @@ SH
   cat > "$dir/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
 [ "${1:-}" != --stop ] || exit 0
-sleep 5
+sleep 20
 printf 'check: fixture wake\n'
 SH
   chmod +x "$dir/bin/fm-watch-arm.sh"
@@ -656,7 +656,7 @@ SH
   app_pid=$!
   BG_FIXTURE_PIDS+=("$app_pid")
   printf '%s\n' "$app_pid" > "$dir/state/.lock"
-  printf 'v1 %s desktop-a generation-a %s\n' "$app_pid" "$(($(date +%s) + 3))" \
+  printf 'v1 %s desktop-a generation-a %s\n' "$app_pid" "$(($(date +%s) + 15))" \
     > "$dir/state/.lock-desktop-lease"
 
   FM_TEST_APP_PID="$app_pid" PATH="$fakebin:$PATH" FM_HOME="$dir" \
