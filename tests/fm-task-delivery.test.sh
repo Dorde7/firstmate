@@ -524,7 +524,8 @@ test_local_merge_lands_on_the_mirror_checkout_regardless_of_registry() {
       stale-main)
         git -C "$proj" branch main master~0 || fail "could not create stale main"
         git -C "$proj" commit -q --allow-empty -m landing-advance || fail "could not advance master"
-        git -C "$proj" checkout -q "fix/$id" && git -C "$proj" rebase -q master >/dev/null \
+        git -C "$proj" checkout -q "fix/$id" || fail "could not check out task branch"
+        git -C "$proj" rebase -q master >/dev/null \
           || fail "could not rebase task branch onto advanced master"
         fix=$(git -C "$proj" rev-parse HEAD)
         git -C "$proj" checkout -q master || fail "could not restore mirror checkout"
