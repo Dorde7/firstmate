@@ -1,0 +1,29 @@
++(eval):3> git init -q -b feature/link-sim-report-review $TMP/live
++(eval):3> git -C $TMP/live commit -q --allow-empty -m live-886789d
++(eval):4> git clone -q $TMP/live $TMP/microring_filter
++(eval):4> cd $TMP/microring_filter
++(eval):5> git checkout -q -b master
++(eval):5> git commit -q --allow-empty -m mirror-178817d
++(eval):6> git symbolic-ref refs/remotes/origin/HEAD
+refs/remotes/origin/feature/link-sim-report-review
++(eval):7> mkdir -p $TMP/home/state $TMP/home/data
++(eval):8> echo '- microring_filter [local-only] - test (added 2026-09-26)'
++(eval):9> git checkout -q -b fm/t1
++(eval):9> git commit -q --allow-empty -m task-work
++(eval):9> git checkout -q master
++(eval):10> printf 'project=%s\nmode=local-only\nbranch=fm/t1\nlanding_branch=master\n' $TMP/microring_filter
++(eval):11> FM_HOME=$TMP/home FM_STATE_OVERRIDE=$TMP/home/state /Users/dorde.gluhovic/.no-mistakes/worktrees/535d05b7100c/01M3J9DH178W8WY9H02YGVZEH1/bin/fm-merge-local.sh t1
+●━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+●  WATCHER DOWN - SUPERVISION IS OFF
+●  1 task(s) in flight, but no watcher has a fresh beacon (last beat: never, grace 300s).
+●  Trust the emitted supervision protocol for this harness; do not use shell & for watcher repair.
+●  This is a supervision warning only; the guarded operation WILL still run.
+●  watcher supervision needs Stop-owned automatic recovery; inspect the hook registration and startup status before ending the turn.
+●━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+merged fm/t1 into local master (6aef06a -> d2d4344) in $TMP/microring_filter
++(eval):12> git log --oneline -3 master
+d2d4344 task-work
+6aef06a mirror-178817d
+fd0ce9b live-886789d
++(eval):13> git symbolic-ref refs/remotes/origin/HEAD
+refs/remotes/origin/feature/link-sim-report-review
