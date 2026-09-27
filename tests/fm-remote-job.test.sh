@@ -1152,26 +1152,60 @@ pass "an idle worker blocks between passes instead of busy-polling"
 quiet_heartbeat_stays_fresh "$QUIET_STATE" "$QUIET_HOME" idle
 pass "an idle worker keeps its readiness heartbeat fresh while blocked"
 
-# Nudges buffered while the worker was busy - here a burst of 100 landing at
-# once - coalesce into a single wake: the worker takes one short fast-poll
-# window and returns to its quiet idle wait instead of one window per nudge.
-quiet_burst_settles() { # <state> <label>
-  local burst='' deadline
-  for _ in $(seq 1 100); do burst="${burst}w"; done
-  printf '%s' "$burst" 1<>"$1/worker.wake"
+# Publishers never block on a worker that is not reading: with the worker
+# stopped, a burst of nudges well past the FIFO's pipe capacity and a staging
+# all return promptly. Resumed, the worker claims the staged job, and the burst
+# coalesced into one wake, so it settles back to its quiet idle wait instead of
+# one fast-poll window per nudge.
+quiet_stopped_burst() { # <state> <account-home> <touched> <label>
+  local burst_pid deadline began elapsed
+  kill -STOP "$QUIET_WORKER_PID"
+  (
+    FM_REMOTE_JOB_STATE="$1"
+    for _ in $(seq 1 10000); do fm_remote_job_wake_worker; done
+    FM_REMOTE_JOB_STATE_ROOT="$1"
+    FM_REMOTE_JOB_QUEUE_TIMEOUT=60
+    FM_REMOTE_JOB_TIMEOUT=30
+    fm_remote_job_stage "$2" "$REMOTE_ROOT" "$REMOTE_HOME" fm-touch-job.sh "$3" \
+      < /dev/null > /dev/null || exit 1
+    printf '%s\n' "$FM_REMOTE_JOB_ID" > "$TMP_ROOT/quiet-burst.id"
+  ) &
+  burst_pid=$!
+  deadline=$((SECONDS + 20))
+  while kill -0 "$burst_pid" 2>/dev/null && [ "$SECONDS" -lt "$deadline" ]; do sleep 0.1; done
+  if kill -0 "$burst_pid" 2>/dev/null; then
+    kill -KILL "$burst_pid" 2>/dev/null || true
+    kill -CONT "$QUIET_WORKER_PID"
+    fail "nudges and staging blocked on the stopped $4 worker"
+  fi
+  wait "$burst_pid" || { kill -CONT "$QUIET_WORKER_PID"; fail "staging to the stopped $4 worker failed"; }
+  kill -CONT "$QUIET_WORKER_PID"
+  began=$SECONDS
+  (
+    FM_REMOTE_JOB_STATE_ROOT="$1"
+    FM_REMOTE_JOB_TIMEOUT=30
+    FM_REMOTE_JOB_ID=$(cat "$TMP_ROOT/quiet-burst.id")
+    fm_remote_job_wait "$2" "$FM_REMOTE_JOB_ID" || exit 1
+    [ "$FM_REMOTE_JOB_EXIT" -eq 0 ] || exit 1
+    fm_remote_job_reap "$2" "$FM_REMOTE_JOB_ID"
+  ) || fail "the job staged to the stopped $4 worker did not complete once resumed"
+  elapsed=$((SECONDS - began))
+  assert_present "$3" "the job staged to the stopped $4 worker did not run"
+  [ "$elapsed" -lt 15 ] \
+    || fail "the job staged to the stopped $4 worker waited ${elapsed}s once resumed"
   deadline=$((SECONDS + 10))
   while :; do
     : > "$QUIET_EXEC_LOG"
     sleep 1.5
     [ "$(grep -cx sleep "$QUIET_EXEC_LOG" || true)" -gt 0 ] || break
     [ "$SECONDS" -lt "$deadline" ] \
-      || fail "the $2 worker kept fast-polling 10s after a burst of 100 nudges"
+      || fail "the $4 worker kept fast-polling 10s after a burst of nudges"
   done
   : > "$QUIET_EXEC_LOG"
 }
-quiet_burst_settles "$QUIET_STATE" idle
+quiet_stopped_burst "$QUIET_STATE" "$QUIET_HOME" "$TMP_ROOT/quiet-burst-touched" idle
 quiet_measure "a worker after a nudge burst" 0
-pass "a burst of buffered nudges coalesces into one wake"
+pass "publishers never block on a stopped worker, and their burst coalesces into one wake"
 
 # Staging nudges the blocked worker, so new work is claimed and published
 # promptly.

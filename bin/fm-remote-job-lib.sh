@@ -57,9 +57,12 @@
 #
 # Staging, cancellation, and a lane finishing its job each nudge the serving
 # worker through its worker.wake FIFO, so an idle worker can block without
-# forking and still claim new work as soon as it is published. A missing or
-# foreign wake FIFO only delays pickup to the worker's idle bound; the nudge
-# never blocks or fails its caller.
+# forking and still claim new work as soon as it is published. A nudge writes
+# its byte only while the worker's worker.wake.pending marker is empty, and the
+# worker empties that marker after consuming a byte and before rescanning, so a
+# burst coalesces into one pending wake and the pipe can never fill. A missing
+# or foreign wake FIFO or marker only delays pickup to the worker's idle bound;
+# the nudge never blocks or fails its caller.
 #
 # The worker accepts only a tracked, non-symlink executable named fm-*.sh below
 # its configured FM_ROOT/bin. Every child receives env -i with the composed
@@ -592,13 +595,19 @@ fm_remote_job_worker_wake_path() { printf '%s\n' "$FM_REMOTE_JOB_STATE/worker.wa
 
 # Best-effort nudge after publishing queue work. The worker holds the FIFO open
 # read-write, so this read-write open never blocks, and a byte written while no
-# worker holds it is discarded on close. Anything but a real FIFO is left alone.
+# worker holds it is discarded on close. A non-empty pending marker means a
+# byte is already waiting and the worker has not yet rescanned, so that wake
+# covers work published before this call and no second byte is written.
+# Anything but a real FIFO and a regular marker is left alone.
 fm_remote_job_wake_worker() {
-  local wake
+  local wake pending
   [ -n "$FM_REMOTE_JOB_STATE" ] || return 0
   wake="$FM_REMOTE_JOB_STATE/worker.wake"
+  pending="$wake.pending"
   [ -p "$wake" ] && [ ! -L "$wake" ] || return 0
-  { printf 'w' 1<>"$wake"; } 2>/dev/null || true
+  [ -f "$pending" ] && [ ! -L "$pending" ] || return 0
+  [ ! -s "$pending" ] || return 0
+  { printf 'w' > "$pending"; printf 'w' 1<>"$wake"; } 2>/dev/null || true
   return 0
 }
 

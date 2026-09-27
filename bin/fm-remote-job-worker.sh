@@ -26,8 +26,8 @@
 # wake nudge, a lane started, or a lane reaped - it rescans every
 # FM_REMOTE_JOB_POLL_SECONDS for 20 passes, then blocks on its worker.wake FIFO
 # for up to one second without forking. The library's nudge on staging,
-# cancellation, and lane exit ends that wait at once, and each wake drains
-# every nudge already buffered, so a burst restarts that short window once
+# cancellation, and lane exit ends that wait at once, and a burst of nudges
+# coalesces into one pending wake, so it restarts that short window once
 # rather than once per nudge; the bound alone still
 # finds a lane that died without nudging, an orphaned claim, and an expired
 # queue deadline. Without a usable FIFO the loop sleeps that same second
@@ -89,6 +89,7 @@ WORKER_LANE_PIDS=()
 WORKER_LANE_STARTS=()
 WORKER_LANE_JOBS=()
 WORKER_WAKE_OPEN=0
+WORKER_WAKE_PENDING=
 WORKER_ACTIVITY=0
 
 worker_error() { printf 'remote-job-worker: %s\n' "$1" >&2; }
@@ -1124,32 +1125,36 @@ worker_process_once() { # <account-home>
 }
 
 # Open this worker's wake FIFO read-write on fd 8, replacing anything else at
-# its path. Holding both ends means the idle read never sees end-of-file and a
-# nudge written while this worker is busy waits in the pipe. Without the FIFO
-# the loop falls back to sleeping out the idle bound.
+# its path or its pending marker's. Holding both ends means the idle read never
+# sees end-of-file and a nudge written while this worker is busy waits in the
+# pipe. The marker is emptied only once the FIFO is held, so a nudge a previous
+# holder never consumed cannot leave it set with no byte to clear it. Without
+# the FIFO the loop falls back to sleeping out the idle bound.
 worker_open_wake() {
-  local wake
+  local wake pending
   wake=$(fm_remote_job_worker_wake_path)
+  pending="$wake.pending"
   if [ -L "$wake" ] || { [ -e "$wake" ] && [ ! -p "$wake" ]; }; then
     rm -f -- "$wake" 2>/dev/null || return 1
+  fi
+  if [ -L "$pending" ] || { [ -e "$pending" ] && [ ! -f "$pending" ]; }; then
+    rm -f -- "$pending" 2>/dev/null || return 1
   fi
   if [ ! -p "$wake" ]; then
     (umask 077; mkfifo "$wake") 2>/dev/null || return 1
   fi
   [ -p "$wake" ] && [ ! -L "$wake" ] || return 1
   exec 8<> "$wake" || return 1
+  (umask 077; : > "$pending") 2>/dev/null || { exec 8<&-; return 1; }
+  WORKER_WAKE_PENDING=$pending
   WORKER_WAKE_OPEN=1
 }
 
-# Coalesce a burst of nudges into the wake that just consumed one: a newline,
-# which no nudge sends, is queued behind every byte already buffered and the
-# read consumes up to it, leaving later nudges for the next wake. The write
-# runs apart so a full pipe can never block the worker against its own read.
-worker_drain_wake() {
-  local drained
-  { printf '\n' >&8; } 2>/dev/null &
-  IFS= read -r -t "$WORKER_IDLE_WAIT_SECONDS" drained <&8 || true
-  : "$drained"
+# Clear the pending marker after consuming a wake byte and before the rescan,
+# so a nudge that saw it set relies on a pass that has not yet looked.
+worker_clear_wake() {
+  [ -f "$WORKER_WAKE_PENDING" ] && [ ! -L "$WORKER_WAKE_PENDING" ] || return 0
+  { : > "$WORKER_WAKE_PENDING"; } 2>/dev/null || true
 }
 
 # Wait for the next pass: poll quickly for a short window after activity so a
@@ -1176,7 +1181,7 @@ worker_wait_for_work() {
   started=$SECONDS
   if IFS= read -r -t "$WORKER_IDLE_WAIT_SECONDS" -n 1 byte <&8; then
     : "$byte"
-    worker_drain_wake
+    worker_clear_wake
     WORKER_ACTIVITY=1
     return 0
   fi
