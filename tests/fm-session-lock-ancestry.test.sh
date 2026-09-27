@@ -606,6 +606,72 @@ SH
   pass "session-lock e2e: Desktop renew reclaims a free lock, refuses a live one, and hooks renew only their own lease"
 }
 
+# A supervision host park blocks every hook of its Codex Desktop thread, and a
+# default away park (3600 seconds) outlives the 1800-second lease. The host
+# must renew its thread's lease from the park loop so its own ownership check
+# still passes when the close arrives. The lease here starts nearly expired so
+# the park outlives it within seconds.
+test_codex_desktop_host_park_renews_lease() {
+  local dir fakebin app_pid generation expiry
+  dir="$TMP_ROOT/codex-desktop-host-park"
+  fakebin=$(fm_fakebin "$dir")
+  mkdir -p "$dir/state" "$dir/config" "$dir/bin"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+field= pid=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field=$2; shift 2 ;;
+    -p) pid=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+if [ "$pid" = "$FM_TEST_APP_PID" ]; then
+  case "$field" in
+    comm=) printf '%s\n' codex ;;
+    args=) printf '%s\n' 'codex app-server --listen unix:// --managed-daemon' ;;
+    ppid=) printf '%s\n' 1 ;;
+  esac
+else
+  case "$field" in
+    comm=) printf '%s\n' bash ;;
+    args=) printf '%s\n' 'bash /repo/bin/fm-supervision-host.sh' ;;
+    ppid=) printf '%s\n' "$FM_TEST_APP_PID" ;;
+  esac
+fi
+SH
+  chmod +x "$fakebin/ps"
+  cp -R "$ROOT/bin/." "$dir/bin/"
+  cat > "$dir/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+[ "${1:-}" != --stop ] || exit 0
+sleep 5
+printf 'check: fixture wake\n'
+SH
+  chmod +x "$dir/bin/fm-watch-arm.sh"
+  : > "$dir/config/supervision-host"
+  : > "$dir/state/.afk-contract"
+  sleep 120 &
+  app_pid=$!
+  BG_FIXTURE_PIDS+=("$app_pid")
+  printf '%s\n' "$app_pid" > "$dir/state/.lock"
+  printf 'v1 %s desktop-a generation-a %s\n' "$app_pid" "$(($(date +%s) + 3))" \
+    > "$dir/state/.lock-desktop-lease"
+
+  FM_TEST_APP_PID="$app_pid" PATH="$fakebin:$PATH" FM_HOME="$dir" \
+    CODEX_SESSION_ID=desktop-a CODEX_THREAD_ID=desktop-a \
+    FM_SUPERVISION_HOST_PRIMARY=codex FM_SUPERVISION_HOST_PARK_SECONDS=3600 \
+    "$dir/bin/fm-supervision-host.sh" park > "$dir/host.out" 2>&1
+  if grep -q 'supervision-host stood down' "$dir/host.out"; then
+    fail "the host stood down when its park outlived the Desktop lease: $(cat "$dir/host.out")"
+  fi
+  read -r _ _ _ generation expiry < "$dir/state/.lock-desktop-lease"
+  [ "$generation" = generation-a ] || fail "the host park changed the Desktop lease generation"
+  [ "$expiry" -gt "$(($(date +%s) + 1500))" ] || fail "the host park did not renew the Desktop lease"
+  pass "session-lock e2e: a supervision host park longer than the Desktop lease keeps renewing it"
+}
+
 # A background Claude session's process table. The hook fires inside
 # `claude bg-spare` (710), whose parent is `claude bg-pty-host` (720). With the
 # transient daemon gone the pty-host is reparented to launchd, so the contiguous
@@ -1434,6 +1500,7 @@ test_competing_version_named_session_is_seen_as_live
 test_codex_app_server_is_not_a_session_lock_owner
 test_codex_desktop_lock_lease_acquire_and_reclaim
 test_codex_desktop_renew_reclaims_free_lock
+test_codex_desktop_host_park_renews_lease
 test_same_session_id_owns_a_recycled_background_chain
 test_anchor_pid_is_the_model_loop_process_only_for_a_trusted_id
 test_e2e_version_named_session_claims_the_home

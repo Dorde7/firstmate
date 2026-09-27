@@ -476,10 +476,13 @@ stream_ready_line() {
 }
 
 # Wait for the current arm to close. Returns 0 with ARM_TEXT set,
-# or 1 when the park boundary arrives first.
+# or 1 when the park boundary arrives first. A park blocks the Codex Desktop
+# thread's own hooks, so each poll renews that thread's fleet-lock lease once
+# it has aged past the touch interval; other sessions have no lease to renew.
 await_close() {
   while fm_pid_alive "$ARM_PID"; do
     refresh_process "$ARM_PID"
+    fm_codex_desktop_lease_touch "$STATE" "$SCRIPT_DIR/fm-lock.sh"
     [ "$READY_PENDING" -eq 0 ] || stream_ready_line
     boundary_reached && return 1
     sleep "$POLL"

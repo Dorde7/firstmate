@@ -87,13 +87,17 @@ fm_codex_desktop_session_id() {
 # The matching id and unexpired lease are the actual ownership evidence.
 # A pre-lease lock naming the same live daemon has no ownership evidence.
 # The lease lasts ten default checkpoint cycles. The foreground checkpoint, every
-# Bash tool call, every turn end, and session start or resume renew it, so a
-# live thread never approaches the bound while an ended thread frees the lock
-# within half an hour.
+# Bash tool call, every turn end, session start or resume, and each poll of a
+# supervision host park renew it, so a live thread never approaches the bound
+# while an ended thread frees the lock within half an hour.
 # Renewal gap: while supervising, the longest normal gap is the 180-second
-# checkpoint interval. An idle thread that is not supervising renews nothing,
-# and its lease is meant to expire; the renew fall-through in bin/fm-lock.sh
-# reclaims that free lock at the thread's next checkpoint.
+# checkpoint interval. A supervision host park, including a default one-hour
+# away park, blocks those hooks, so the host renews from its park loop; its
+# longest gap is the 300-second touch interval plus one bounded engine turn
+# (1200 seconds and a 30-second grace by default). An idle thread that is not
+# supervising renews nothing, and its lease is meant to expire; the renew
+# fall-through in bin/fm-lock.sh reclaims that free lock at the thread's next
+# checkpoint.
 FM_CODEX_DESKTOP_LEASE_SECONDS=1800
 FM_CODEX_DESKTOP_LEASE_TOUCH_SECONDS=300
 FM_CODEX_LEASE_PID=
