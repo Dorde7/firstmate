@@ -188,7 +188,7 @@ The objection bounds how much weight detection can carry alone, which is the wei
 
 Read the modes as stopping points rather than as artifacts and they line up cleanly:
 
-- `local-only` stops at a ready branch and publishes nothing. Nothing about a forge applies, because no artifact is made: `bin/fm-merge-local.sh` fast-forwards the project's *local* default branch, and the intake guidance already allows a `local-only` project to have no remote at all.
+- `local-only` stops at a ready branch and publishes nothing. Nothing about a forge applies, because no artifact is made: `bin/fm-merge-local.sh` fast-forwards the project's *local* landing branch, and the intake guidance already allows a `local-only` project to have no remote at all.
 - `direct-PR` publishes without the pipeline.
 - `no-mistakes` runs the pipeline, then publishes.
 
@@ -200,7 +200,7 @@ The refusal reads as reasonable only because of the name.
 "That mode's definition of done is a pull request this forge does not have" is a true statement about the string `direct-PR` and not about the stopping point it names, and section 2 is why those two came apart.
 
 The permission is not merely useless, which is worth being plain about, because an inert annotation in a brief is not inert at landing.
-`local-only`'s configured landing is a guarded fast-forward of the project's local default branch.
+`local-only`'s configured landing is a guarded fast-forward of the project's local landing branch.
 On a project whose changes are supposed to reach a review server, that landing advances local `main` with content the server has never seen, and the annotation that was supposed to record "this is a Gerrit project" is the one thing in the posture that does not get consulted.
 
 ## 4. What Gerrit makes structurally impossible
