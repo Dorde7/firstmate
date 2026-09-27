@@ -61,8 +61,9 @@
 # its byte only after exclusively creating the worker.wake.pending marker, and
 # the worker removes that marker after consuming a byte and before rescanning,
 # so a burst - concurrent or not - coalesces into one pending byte and the pipe
-# can never fill. A missing or foreign wake FIFO or marker only delays pickup to
-# the worker's idle bound; the nudge never blocks or fails its caller.
+# can never fill; a claim the worker releases as abandoned adds at most one
+# more. A missing or foreign wake FIFO or marker only delays pickup to the
+# worker's idle bound; the nudge never blocks or fails its caller.
 #
 # The worker accepts only a tracked, non-symlink executable named fm-*.sh below
 # its configured FM_ROOT/bin. Every child receives env -i with the composed

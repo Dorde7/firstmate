@@ -1224,6 +1224,45 @@ pass "publishers never block on a stopped worker, and their burst coalesces into
 quiet_stage_completes "$QUIET_STATE" "$QUIET_HOME" "$QUIET_TOUCHED" idle
 pass "staging wakes an idle worker to claim and publish the job promptly"
 
+# A nudge that died between claiming the pending marker and writing its byte
+# leaves the marker with nothing to consume it. Once the finished lane's exit
+# nudge has settled, the test claims the marker itself and never writes, as
+# such a nudge would. The worker keeps that claim - a nudge still mid-write
+# must not lose it - for its 30-second release bound, then releases it so the
+# next nudge wakes the worker at once again.
+quiet_abandoned_claim_released() { # <state> <label>
+  local pending="$1/worker.wake.pending" planted='' released
+  sleep 3
+  for _ in $(seq 1 100); do
+    if ( set -C; : > "$pending" ) 2>/dev/null; then planted=$SECONDS; break; fi
+    sleep 0.1
+  done
+  [ -n "$planted" ] || fail "the $2 worker never released the pending marker to claim"
+  sleep 5
+  ( FM_REMOTE_JOB_STATE="$1"; fm_remote_job_wake_worker )
+  assert_present "$pending" "the $2 worker released a pending claim well inside its bound"
+  while [ -e "$pending" ] && [ $((SECONDS - planted)) -lt 60 ]; do sleep 0.5; done
+  [ ! -e "$pending" ] || fail "the $2 worker never released an abandoned pending claim"
+  released=$((SECONDS - planted))
+  [ "$released" -ge 25 ] \
+    || fail "the $2 worker released a pending claim after only ${released}s"
+  : > "$QUIET_EXEC_LOG"
+  ( FM_REMOTE_JOB_STATE="$1"; fm_remote_job_wake_worker )
+  for _ in $(seq 1 30); do
+    [ "$(grep -cx sleep "$QUIET_EXEC_LOG" || true)" -eq 0 ] || break
+    sleep 0.1
+  done
+  [ "$(grep -cx sleep "$QUIET_EXEC_LOG" || true)" -gt 0 ] \
+    || fail "a nudge after the release did not wake the $2 worker"
+  for _ in $(seq 1 50); do
+    [ -e "$pending" ] || break
+    sleep 0.1
+  done
+  [ ! -e "$pending" ] || fail "the woken $2 worker left the pending marker claimed"
+}
+quiet_abandoned_claim_released "$QUIET_STATE" idle
+pass "an abandoned pending claim is kept inside its bound and then released"
+
 # Hoisting setup out of every pass must not drop the worker's own repair of the
 # queue directories' 0700 modes: the periodic sweep still re-applies them with
 # no staging to trigger it.

@@ -30,9 +30,13 @@
 # coalesces into the one wake byte a nudge may have pending, so it restarts
 # that short window once rather than once per nudge; the bound alone still
 # finds a lane that died without nudging, an orphaned claim, and an expired
-# queue deadline. Without a usable FIFO the loop sleeps that same second
-# between idle passes instead. Either way the readiness heartbeat is refreshed
-# about once per second, far inside the probe's 10-second freshness bound. The
+# queue deadline. A marker claimed by a nudge that died before writing its
+# byte suppresses nudges, never rescans, and is released once it has stood
+# through idle waits with no byte for 30 seconds; a nudge paused longer than
+# that, or across a worker restart, can at worst add one harmless extra wake.
+# Without a usable FIFO the loop sleeps that same second between idle passes
+# instead. Either way the readiness heartbeat is refreshed about once per
+# second, far inside the probe's 10-second freshness bound. The
 # stale sweep, whose state preparation also re-applies the queue directories'
 # 0700 modes, runs at startup and then at most every 60 seconds, never more
 # rarely than the shortest record reap age.
@@ -69,6 +73,7 @@ WORKER_FAST_PASSES=20
 # bash 3.2 read -t takes whole seconds; one keeps the heartbeat fresh.
 WORKER_IDLE_WAIT_SECONDS=1
 WORKER_SWEEP_SECONDS=60
+WORKER_WAKE_RELEASE_SECONDS=30
 
 SCRIPT_DIR=$(CDPATH='' cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
 FM_ROOT=${FM_ROOT_OVERRIDE:-$(CDPATH='' cd "$SCRIPT_DIR/.." && pwd -P)}
@@ -90,6 +95,7 @@ WORKER_LANE_STARTS=()
 WORKER_LANE_JOBS=()
 WORKER_WAKE_OPEN=0
 WORKER_WAKE_PENDING=
+WORKER_WAKE_CLAIMED_SINCE=
 WORKER_ACTIVITY=0
 
 worker_error() { printf 'remote-job-worker: %s\n' "$1" >&2; }
@@ -1151,6 +1157,7 @@ worker_open_wake() {
 # wake byte this runs before the rescan, so a nudge that lost the claim relies
 # on a pass that has not yet looked.
 worker_clear_wake() {
+  WORKER_WAKE_CLAIMED_SINCE=
   [ -e "$WORKER_WAKE_PENDING" ] || [ -L "$WORKER_WAKE_PENDING" ] || return 0
   rm -f -- "$WORKER_WAKE_PENDING" 2>/dev/null
 }
@@ -1161,8 +1168,8 @@ worker_clear_wake() {
 # out when there is no FIFO. A read that returns early without a byte and
 # without a second elapsing cannot be the timeout, so the descriptor is
 # unusable and the loop falls back to sleeping rather than spinning. A marker
-# still claimed after a full idle bound with no byte belongs to a nudge that
-# died between claiming and writing, so the timeout releases it.
+# that stays claimed through idle timeouts with no byte for the release bound
+# belongs to a nudge that died between claiming and writing, so it is released.
 worker_wait_for_work() {
   local started byte
   if [ "$WORKER_ACTIVITY" -eq 1 ]; then
@@ -1190,7 +1197,13 @@ worker_wait_for_work() {
     WORKER_WAKE_OPEN=0
     return 0
   fi
-  worker_clear_wake || true
+  if [ ! -e "$WORKER_WAKE_PENDING" ] && [ ! -L "$WORKER_WAKE_PENDING" ]; then
+    WORKER_WAKE_CLAIMED_SINCE=
+  elif [ -z "$WORKER_WAKE_CLAIMED_SINCE" ]; then
+    WORKER_WAKE_CLAIMED_SINCE=$SECONDS
+  elif [ $((SECONDS - WORKER_WAKE_CLAIMED_SINCE)) -ge "$WORKER_WAKE_RELEASE_SECONDS" ]; then
+    worker_clear_wake || true
+  fi
   return 0
 }
 
