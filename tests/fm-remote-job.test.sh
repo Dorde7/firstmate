@@ -1152,6 +1152,27 @@ pass "an idle worker blocks between passes instead of busy-polling"
 quiet_heartbeat_stays_fresh "$QUIET_STATE" "$QUIET_HOME" idle
 pass "an idle worker keeps its readiness heartbeat fresh while blocked"
 
+# Nudges buffered while the worker was busy - here a burst of 100 landing at
+# once - coalesce into a single wake: the worker takes one short fast-poll
+# window and returns to its quiet idle wait instead of one window per nudge.
+quiet_burst_settles() { # <state> <label>
+  local burst='' deadline
+  for _ in $(seq 1 100); do burst="${burst}w"; done
+  printf '%s' "$burst" 1<>"$1/worker.wake"
+  deadline=$((SECONDS + 10))
+  while :; do
+    : > "$QUIET_EXEC_LOG"
+    sleep 1.5
+    [ "$(grep -cx sleep "$QUIET_EXEC_LOG" || true)" -gt 0 ] || break
+    [ "$SECONDS" -lt "$deadline" ] \
+      || fail "the $2 worker kept fast-polling 10s after a burst of 100 nudges"
+  done
+  : > "$QUIET_EXEC_LOG"
+}
+quiet_burst_settles "$QUIET_STATE" idle
+quiet_measure "a worker after a nudge burst" 0
+pass "a burst of buffered nudges coalesces into one wake"
+
 # Staging nudges the blocked worker, so new work is claimed and published
 # promptly.
 quiet_stage_completes "$QUIET_STATE" "$QUIET_HOME" "$QUIET_TOUCHED" idle

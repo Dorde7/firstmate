@@ -26,7 +26,9 @@
 # wake nudge, a lane started, or a lane reaped - it rescans every
 # FM_REMOTE_JOB_POLL_SECONDS for 20 passes, then blocks on its worker.wake FIFO
 # for up to one second without forking. The library's nudge on staging,
-# cancellation, and lane exit ends that wait at once; the bound alone still
+# cancellation, and lane exit ends that wait at once, and each wake drains
+# every nudge already buffered, so a burst restarts that short window once
+# rather than once per nudge; the bound alone still
 # finds a lane that died without nudging, an orphaned claim, and an expired
 # queue deadline. Without a usable FIFO the loop sleeps that same second
 # between idle passes instead. Either way the readiness heartbeat is refreshed
@@ -1139,6 +1141,17 @@ worker_open_wake() {
   WORKER_WAKE_OPEN=1
 }
 
+# Coalesce a burst of nudges into the wake that just consumed one: a newline,
+# which no nudge sends, is queued behind every byte already buffered and the
+# read consumes up to it, leaving later nudges for the next wake. The write
+# runs apart so a full pipe can never block the worker against its own read.
+worker_drain_wake() {
+  local drained
+  { printf '\n' >&8; } 2>/dev/null &
+  IFS= read -r -t "$WORKER_IDLE_WAIT_SECONDS" drained <&8 || true
+  : "$drained"
+}
+
 # Wait for the next pass: poll quickly for a short window after activity so a
 # lane that nudged just before exiting is reaped and its home's next job
 # starts, otherwise block on the wake FIFO up to the idle bound, or sleep it
@@ -1163,6 +1176,7 @@ worker_wait_for_work() {
   started=$SECONDS
   if IFS= read -r -t "$WORKER_IDLE_WAIT_SECONDS" -n 1 byte <&8; then
     : "$byte"
+    worker_drain_wake
     WORKER_ACTIVITY=1
     return 0
   fi
