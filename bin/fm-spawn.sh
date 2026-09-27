@@ -3295,7 +3295,12 @@ freshen_spawn_worktree_base() { # <worktree>
       if fm_is_local_only_task "$MODE"; then mirror_local_only=1; fi
       ;;
     scout)
-      posture=$("$FM_ROOT/bin/fm-project-mode.sh" --raw "$(basename "$PROJ_ABS")" 2>/dev/null) || posture=
+      # A refused registry entry stops the launch: guessing non-local-only would fetch and set-head a live origin.
+      if ! posture=$("$FM_ROOT/bin/fm-project-mode.sh" --raw "$(basename "$PROJ_ABS")" 2>/dev/null); then
+        "$FM_ROOT/bin/fm-project-mode.sh" --raw "$(basename "$PROJ_ABS")" >/dev/null || true
+        echo "error: the registry entry for $(basename "$PROJ_ABS") does not resolve to a delivery posture (see the refusal above); correct data/projects.md and spawn again" >&2
+        return 1
+      fi
       if fm_is_local_only_task "${posture%% *}"; then mirror_local_only=1; fi
       ;;
   esac

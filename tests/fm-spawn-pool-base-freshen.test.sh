@@ -302,6 +302,30 @@ test_local_only_scout_uses_mirror_checkout_not_live_origin_head() {
   pass "a scout on a local-only project uses the mirror checkout and preserves origin/HEAD"
 }
 
+test_local_only_scout_refuses_a_registry_entry_the_parser_refuses() {
+  local rec id out status before origin_head
+  id='pool-local-only-scout-malformed-r1'
+  rec=$(make_case local-only-scout-malformed "$id" master)
+  read_case_record "$rec"
+  git -C "$PROJECT_DIR" fetch --quiet origin
+  git -C "$PROJECT_DIR" remote set-head origin master
+  origin_head=$(git -C "$PROJECT_DIR" symbolic-ref refs/remotes/origin/HEAD)
+  printf '%s\n' '- project [local-only forge=gerit] - test fixture (added 2026-09-27)' > "$HOME_DIR/data/projects.md"
+  before=$(git -C "$POOL_DIR" rev-parse HEAD)
+
+  out=$(run_spawn "$id" --scout)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a scout launched on a registry entry the parser refuses"$'\n'"$out"
+  assert_contains "$out" 'unknown forge "gerit"' \
+    "a refused scout did not surface the registry parser's refusal"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
+    || fail "a refused scout reset the pool onto an origin-based base"
+  [ "$(git -C "$PROJECT_DIR" symbolic-ref refs/remotes/origin/HEAD)" = "$origin_head" ] \
+    || fail "a refused scout rewrote the mirror's origin/HEAD"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "a refused scout published a task record"
+  pass "a scout refuses to launch when the registry parser refuses the project's entry"
+}
+
 test_local_only_pool_uses_checked_out_branch_over_stale_main() {
   local rec id out status local_default
   id='pool-local-only-stale-main-r1'
@@ -858,6 +882,7 @@ test_non_main_default_branch_refreshes_before_branching
 test_local_only_pool_uses_mirror_default_not_live_origin_head
 test_local_only_pool_uses_checked_out_branch_over_stale_main
 test_local_only_scout_uses_mirror_checkout_not_live_origin_head
+test_local_only_scout_refuses_a_registry_entry_the_parser_refuses
 test_local_only_spawn_refuses_a_mirror_left_on_a_task_branch
 test_direct_pr_and_scout_refresh_before_launch
 test_dirty_pool_refuses_without_discarding_work
